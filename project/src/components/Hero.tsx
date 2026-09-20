@@ -27,8 +27,8 @@ export default function Hero() {
 
         {/* Subtitle */}
         <p className="text-lg md:text-xl text-gray-400 max-w-2xl mx-auto mb-10 animate-slide-up" style={{ animationDelay: '0.1s', opacity: 0 }}>
-          Play classic games powered by intelligent AI opponents. Challenge the machine,
-          beat your high scores, and climb the leaderboard.
+          Play multiplayer tactical football. Train against the AI, challenge a real
+          opponent online, and climb the leaderboard.
         </p>
 
         {/* CTAs */}
@@ -52,8 +52,8 @@ export default function Hero() {
         {/* Stats */}
         <div className="grid grid-cols-3 gap-4 md:gap-12 max-w-2xl mx-auto mt-16 animate-slide-up" style={{ animationDelay: '0.3s', opacity: 0 }}>
           <div className="text-center">
-            <div className="font-display font-bold text-2xl md:text-3xl text-cyan-400">15</div>
-            <div className="text-xs md:text-sm text-gray-500 mt-1">AI Games</div>
+            <div className="font-display font-bold text-2xl md:text-3xl text-cyan-400">1v1</div>
+            <div className="text-xs md:text-sm text-gray-500 mt-1">Online Matches</div>
           </div>
           <div className="text-center">
             <div className="font-display font-bold text-2xl md:text-3xl text-pink-400">∞</div>

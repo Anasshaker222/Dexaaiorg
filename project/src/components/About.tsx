@@ -4,25 +4,25 @@ const features = [
   {
     icon: Cpu,
     title: 'AI Opponents',
-    description: 'Play against intelligent AI that uses algorithms like minimax for optimal strategy. No easy mode — just pure challenge.',
+    description: 'Warm up against a tactical AI in training matches before you take on real players online.',
     color: 'cyan',
   },
   {
     icon: Zap,
     title: 'Instant Play',
-    description: 'No downloads, no sign-ups, no waiting. Click a game and start playing immediately right in your browser.',
+    description: 'No downloads, no sign-ups, no waiting. Open the game and start playing immediately right in your browser.',
     color: 'pink',
   },
   {
     icon: Brain,
     title: 'Track Progress',
-    description: 'Your best scores and records are saved automatically. Beat your personal best and climb the leaderboard.',
+    description: 'Your ELO rating and match record are saved automatically. Win online matches and climb the leaderboard.',
     color: 'green',
   },
   {
     icon: Gamepad2,
     title: 'Fully Responsive',
-    description: 'Play on desktop, tablet, or phone. Every game supports touch controls and keyboard input.',
+    description: 'Play on desktop, tablet, or phone. The game supports both touch and mouse controls.',
     color: 'orange',
   },
 ];
@@ -49,7 +49,7 @@ export default function About() {
             Built for <span className="text-cyan-400">Gamers</span>
           </h2>
           <p className="text-gray-400 max-w-2xl mx-auto">
-            DexaAI Game Center brings classic games to life with intelligent AI opponents and a sleek, modern interface.
+            DexaAI Game Center brings tactical football to life with intelligent AI opponents, real-time online matches and a sleek, modern interface.
           </p>
         </div>
 

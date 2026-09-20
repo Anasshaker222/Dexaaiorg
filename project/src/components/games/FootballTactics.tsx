@@ -100,7 +100,9 @@ export default function FootballTactics() {
       setMode('online');
       rematchLoggedRef.current = false;
     } catch (e) {
-      setError('صار خطأ بالبحث عن خصم، جرّب كمان مرة.');
+      console.error('[matchmaking]', e);
+      const code = (e as { code?: string })?.code;
+      setError(`صار خطأ بالبحث عن خصم${code ? ` (${code})` : ''}، جرّب كمان مرة.`);
       setMode('menu');
     }
   }
