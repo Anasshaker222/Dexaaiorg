@@ -2,6 +2,8 @@ import { doc, getDoc, setDoc, updateDoc, runTransaction, collection, query, orde
 import { db, ensureSignedIn } from './firebase';
 import { DUPLICATE_XP, ITEMS, levelFromXp, matchXp, rollItem, type Item, type ItemKind } from './progression';
 
+export type MatchOutcome = 1 | 0.5 | 0;
+
 export type PlayerRank = {
   name: string;
   elo: number;
@@ -26,9 +28,13 @@ function expected(a: number, b: number) {
 }
 
 /** بيحدّث تصنيف ELO والـ XP والصناديق تبع اللاعب الحالي بس (كل لاعب بيحدّث سجله هوي فقط بعد
- * المباراة، حتى ما يحتاج المشروع أي سيرفر خلفي). */
+ * المباراة، حتى ما يحتاج المشروع أي سيرفر خلفي).
+ * لازم "result" ياخد نتيجة المباراة الفعلية (من state.winner)، مش يتحسب من النتيجة وبس،
+ * عشان بحالة الفوز بالانسحاب (الخصم طلع من اللعبة) يضل الفوز فوز حتى لو كانت النتيجة
+ * وقتها متعادلة أو حتى خسارة على أرض الملعب. */
 export async function recordResult(
   myName: string,
+  result: MatchOutcome,
   myScore: number,
   oppScore: number,
   oppElo: number
@@ -42,11 +48,10 @@ export async function recordResult(
     ? (snap.data() as PlayerRank)
     : { name: myName, elo: START_ELO, wins: 0, losses: 0, draws: 0 };
 
-  const result = myScore > oppScore ? 1 : myScore < oppScore ? 0 : 0.5;
   const newElo = Math.round(current.elo + K * (result - expected(current.elo, oppElo)));
 
   const xpBefore = current.xp ?? 0;
-  const xpGain = matchXp(myScore, oppScore);
+  const xpGain = matchXp(result, myScore);
   const xpAfter = xpBefore + xpGain;
   const levelBefore = levelFromXp(xpBefore);
   const levelAfter = levelFromXp(xpAfter);

@@ -86,9 +86,11 @@ export function levelProgress(xp: number) {
   return { level, current, needed, pct: Math.min(1, current / needed) };
 }
 
-/** XP اللي بيربحها اللاعب بعد مباراة أونلاين: فوز 100، تعادل 50، خسارة 30، + 10 لكل هدف (حد أقصى 3). */
-export function matchXp(myScore: number, oppScore: number): number {
-  const base = myScore > oppScore ? 100 : myScore === oppScore ? 50 : 30;
+/** XP اللي بيربحها اللاعب بعد مباراة أونلاين: فوز 100، تعادل 50، خسارة 30، + 10 لكل هدف (حد أقصى 3).
+ * "result" هي نتيجة المباراة الفعلية (1 فوز / 0.5 تعادل / 0 خسارة)، مش مشتقة من النتيجة نفسها،
+ * عشان فوز بالانسحاب يضل محسوب فوز كامل. */
+export function matchXp(result: 1 | 0.5 | 0, myScore: number): number {
+  const base = result === 1 ? 100 : result === 0.5 ? 50 : 30;
   return base + Math.min(myScore, 3) * 10;
 }
 

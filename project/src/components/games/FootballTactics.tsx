@@ -23,7 +23,17 @@ import {
   type Action,
 } from '../../lib/tacticsEngine';
 import { firebaseEnabled } from '../../lib/firebase';
-import { findOrCreateMatch, cancelSearch, subscribeMatch, pushMatchState, resetMatch, type MatchDoc } from '../../lib/matchmaking';
+import {
+  findOrCreateMatch,
+  cancelSearch,
+  subscribeMatch,
+  pushMatchState,
+  resetMatch,
+  leaveMatch,
+  touchPresence,
+  claimForfeitByTimeout,
+  type MatchDoc,
+} from '../../lib/matchmaking';
 import { recordResult, getMyRank, type PlayerRank, type MatchReward } from '../../lib/ranking';
 import { ITEMS, boostFor, boostName } from '../../lib/progression';
 import TacticsProfile from './TacticsProfile';
@@ -57,6 +67,7 @@ export default function FootballTactics() {
   const [matchId, setMatchId] = useState<string | null>(null);
   const [role, setRole] = useState<Team>('home');
   const [oppName, setOppName] = useState('');
+  const [abandonedBy, setAbandonedBy] = useState<Team | null>(null);
   const rematchLoggedRef = useRef(false);
 
   useEffect(() => {
@@ -83,8 +94,40 @@ export default function FootballTactics() {
       if (!m) return;
       setState(m.state);
       setOppName(role === 'home' ? m.awayName : m.homeName);
+      setAbandonedBy(m.abandonedBy ?? null);
     });
     return unsub;
+  }, [mode, matchId, role]);
+
+  // نبضة حياة دورية طول ما إحنا داخل مباراة أونلاين، عشان الخصم يعرف إننا لسا موجودين
+  useEffect(() => {
+    if (mode !== 'online' || !matchId || state.status !== 'playing') return;
+    touchPresence(matchId, role);
+    const t = setInterval(() => touchPresence(matchId, role), 6000);
+    return () => clearInterval(t);
+  }, [mode, matchId, role, state.status]);
+
+  // مراقبة نبضة الخصم: إذا انقطعت لفترة طويلة منحسم المباراة فوز بالانسحاب
+  useEffect(() => {
+    if (mode !== 'online' || !matchId || state.status !== 'playing') return;
+    const t = setInterval(() => {
+      claimForfeitByTimeout(matchId, role).catch(() => {});
+    }, 5000);
+    return () => clearInterval(t);
+  }, [mode, matchId, role, state.status]);
+
+  // انسحاب صريح: لو المستخدم سكّر التبويب أو غادر الصفحة ومباراته لسا شغالة
+  useEffect(() => {
+    if (mode !== 'online' || !matchId) return;
+    const onLeave = () => {
+      leaveMatch(matchId, role);
+    };
+    window.addEventListener('pagehide', onLeave);
+    window.addEventListener('beforeunload', onLeave);
+    return () => {
+      window.removeEventListener('pagehide', onLeave);
+      window.removeEventListener('beforeunload', onLeave);
+    };
   }, [mode, matchId, role]);
 
   // record ranking once a match finishes (online only)
@@ -93,7 +136,9 @@ export default function FootballTactics() {
     rematchLoggedRef.current = true;
     const my = state.score[role];
     const opp = state.score[role === 'home' ? 'away' : 'home'];
-    recordResult(name || 'لاعب', my, opp, 1000)
+    // نتيجة المباراة الفعلية (فوز بالانسحاب بيضل فوز كامل، حتى لو النتيجة وقتها كانت متعادلة)
+    const result = state.winner === 'draw' ? 0.5 : state.winner === role ? 1 : 0;
+    recordResult(name || 'لاعب', result, my, opp, 1000)
       .then((r) => {
         setReward(r);
         return getMyRank().then(setMyRank);
@@ -106,6 +151,7 @@ export default function FootballTactics() {
     if (state.status === 'playing') {
       rematchLoggedRef.current = false;
       setReward(null);
+      setAbandonedBy(null);
     }
   }, [state.status]);
 
@@ -114,11 +160,16 @@ export default function FootballTactics() {
   }
 
   function backToMenu() {
+    // إذا كانت المباراة لسا شغالة وطلعنا منها، لازم نبلّغ الخصم حتى ما تضل معلّقة عنده
+    if (mode === 'online' && matchId && state.status === 'playing') {
+      leaveMatch(matchId, role);
+    }
     setMode('menu');
     setMatchId(null);
     setSelected(null);
     setPassMode(false);
     setState(initialState());
+    setAbandonedBy(null);
     rematchLoggedRef.current = false;
   }
 
@@ -484,7 +535,9 @@ export default function FootballTactics() {
             <div className="glass rounded-xl border border-slate-700/50 p-5 flex flex-col items-center gap-3 mt-2">
               <Trophy className="w-8 h-8 text-yellow-400" />
               <p className="font-display font-bold">
-                {state.winner === 'draw'
+                {mode === 'online' && abandonedBy === oppTeam
+                  ? 'الخصم انسحب من المباراة، فزت افتراضيًا! 🎉'
+                  : state.winner === 'draw'
                   ? 'تعادل!'
                   : state.winner === myTeam
                   ? 'فزت بالمباراة! 🎉'
@@ -509,7 +562,7 @@ export default function FootballTactics() {
                     <RotateCcw className="w-4 h-4" /> إعادة اللعب
                   </button>
                 )}
-                {mode === 'online' && matchId && (
+                {mode === 'online' && matchId && !abandonedBy && (
                   <button
                     onClick={() => resetMatch(matchId, role === 'home' ? 'away' : 'home', state.boosts)}
                     className="glass card-hover rounded-lg px-4 py-2 text-sm flex items-center gap-1 border border-slate-700/50"

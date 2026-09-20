@@ -16,6 +16,8 @@ import { db, ensureSignedIn } from './firebase';
 import { initialState, type MatchState, type Team, type Boost } from './tacticsEngine';
 import { boostFor } from './progression';
 
+export type Presence = Partial<Record<Team, { toMillis: () => number } | null>>;
+
 export type MatchDoc = {
   home: string;
   away: string;
@@ -23,7 +25,31 @@ export type MatchDoc = {
   awayName: string;
   state: MatchState;
   rematch: { home: boolean; away: boolean };
+  presence?: Presence;
+  abandonedBy?: Team | null;
 };
+
+// كل قد إيش (ms) بيبعث كل لاعب "نبضة" يخبر فيها إنه لسا موجود
+const PRESENCE_INTERVAL_MS = 6000;
+// إذا ما وصلت نبضة الخصم خلال هاد الوقت، بنعتبره منسحب/مقطوع
+const PRESENCE_TIMEOUT_MS = 18000;
+// نفس الفكرة بس للاعب الواقف بالدور (طابور الانتظار)
+const QUEUE_STALE_MS = 20000;
+
+function opponentOf(role: Team): Team {
+  return role === 'home' ? 'away' : 'home';
+}
+
+// عشان نقدر نوقف النبضة والاستماع تبع البحث عن خصم لما المستخدم يلغي البحث
+let activeSearch: { heartbeat: ReturnType<typeof setInterval>; unsub: () => void } | null = null;
+
+function stopActiveSearch() {
+  if (activeSearch) {
+    clearInterval(activeSearch.heartbeat);
+    activeSearch.unsub();
+    activeSearch = null;
+  }
+}
 
 /** بيدوّر على خصم بانتظار الدور، وإذا لقى وحده بينضم له، وإذا لأ بيصير هوي الواقف
  * بالدور وبيستنى لحد ما حدا ينضم إله. بيرجّع matchId وrole (home/away). */
@@ -40,7 +66,15 @@ export async function findOrCreateMatch(
   const queueRef = collection(firestore, 'tacticsQueue');
   const q = query(queueRef, where('status', '==', 'waiting'), limit(5));
   const snap = await getDocs(q);
-  const candidate = snap.docs.find((d) => d.id !== uid);
+  // بنتجاهل أي حدا واقف بالدور من زمان وما بعت نبضة أخيرة (يعني الأغلب سكّر الصفحة
+  // وهو لسا واقف بالدور) عشان ما نتعلق بخصم مش موجود أصلاً
+  const now = Date.now();
+  const candidate = snap.docs.find((d) => {
+    if (d.id === uid) return false;
+    const data = d.data() as { lastSeen?: { toMillis: () => number }; createdAt?: { toMillis: () => number } };
+    const seenAt = data.lastSeen?.toMillis?.() ?? data.createdAt?.toMillis?.() ?? 0;
+    return now - seenAt < QUEUE_STALE_MS;
+  });
 
   if (candidate) {
     const matchId = `m_${candidate.id}_${uid}_${Date.now()}`;
@@ -67,6 +101,7 @@ export async function findOrCreateMatch(
   }
 
   // ما لقينا خصم، صير أنت الواقف بالدور
+  stopActiveSearch(); // احتياط: لو كان في بحث سابق ما انسكر منيح
   onWaiting();
   await setDoc(doc(firestore, 'tacticsQueue', uid), {
     name: displayName || 'لاعب',
@@ -74,27 +109,33 @@ export async function findOrCreateMatch(
     boost: myBoostId,
     matchId: null,
     createdAt: serverTimestamp(),
+    lastSeen: serverTimestamp(),
   });
 
   return new Promise((resolve, reject) => {
+    const heartbeat = setInterval(() => {
+      updateDoc(doc(firestore, 'tacticsQueue', uid), { lastSeen: serverTimestamp() }).catch(() => {});
+    }, PRESENCE_INTERVAL_MS);
     const unsub = onSnapshot(
       doc(firestore, 'tacticsQueue', uid),
       (d) => {
         const data = d.data();
         if (data?.status === 'matched' && data.matchId) {
-          unsub();
+          stopActiveSearch();
           resolve({ matchId: data.matchId, role: 'home' });
         }
       },
       (err) => {
-        unsub();
+        stopActiveSearch();
         reject(err);
       }
     );
+    activeSearch = { heartbeat, unsub };
   });
 }
 
 export async function cancelSearch() {
+  stopActiveSearch();
   if (!db) return;
   const firestore = db;
   const uid = await ensureSignedIn();
@@ -128,6 +169,57 @@ export async function resetMatch(matchId: string, kickoff: Team, boosts?: Record
   await updateDoc(doc(firestore, 'tacticsMatches', matchId), {
     state: initialState(kickoff, boosts),
     rematch: { home: false, away: false },
+    abandonedBy: null,
     updatedAt: serverTimestamp(),
   });
+}
+
+/** بيبعت "نبضة حياة" لصاحب الدور بالمباراة، عشان الخصم يعرف إنك لسا موجود. */
+export async function touchPresence(matchId: string, role: Team) {
+  if (!db) return;
+  await updateDoc(doc(db, 'tacticsMatches', matchId), {
+    [`presence.${role}`]: serverTimestamp(),
+  }).catch(() => {});
+}
+
+/** انسحاب صريح (رجوع للقائمة الرئيسية، أو إغلاق الصفحة): بتخلص المباراة فورًا
+ * وتدي الفوز للخصم، عشان ما تضل معلّقة وما يضيع حق اللي كمّل. */
+export async function leaveMatch(matchId: string, role: Team) {
+  if (!db) return;
+  const firestore = db;
+  await runTransaction(firestore, async (tx) => {
+    const ref = doc(firestore, 'tacticsMatches', matchId);
+    const snap = await tx.get(ref);
+    if (!snap.exists()) return;
+    const data = snap.data() as MatchDoc;
+    if (data.state.status === 'finished') return; // خلصت أصلاً، ما في داعي نلمسها
+    tx.update(ref, {
+      state: { ...data.state, status: 'finished', winner: opponentOf(role) },
+      abandonedBy: role,
+      updatedAt: serverTimestamp(),
+    });
+  }).catch(() => {});
+}
+
+/** بيتفحّص إذا الخصم توقف عن إرسال نبضات لفترة أطول من المسموح، وإذا هيك
+ * بيحسم المباراة لصالحي (فوز بالانسحاب) بترانزاكشن آمنة حتى ما تصير مرتين. */
+export async function claimForfeitByTimeout(matchId: string, myRole: Team): Promise<boolean> {
+  if (!db) return false;
+  const firestore = db;
+  const oppRole = opponentOf(myRole);
+  return runTransaction(firestore, async (tx) => {
+    const ref = doc(firestore, 'tacticsMatches', matchId);
+    const snap = await tx.get(ref);
+    if (!snap.exists()) return false;
+    const data = snap.data() as MatchDoc;
+    if (data.state.status === 'finished') return false;
+    const seenAt = data.presence?.[oppRole]?.toMillis?.() ?? 0;
+    if (Date.now() - seenAt < PRESENCE_TIMEOUT_MS) return false; // لسا موجود، ما بنحسمها
+    tx.update(ref, {
+      state: { ...data.state, status: 'finished', winner: myRole },
+      abandonedBy: oppRole,
+      updatedAt: serverTimestamp(),
+    });
+    return true;
+  }).catch(() => false);
 }
