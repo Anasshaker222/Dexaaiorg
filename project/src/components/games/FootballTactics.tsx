@@ -1,18 +1,24 @@
-import { useEffect, useRef, useState } from 'react';
-import { Swords, Users, Bot, Loader2, Trophy, RotateCcw, X, Crosshair, Footprints, Shield } from 'lucide-react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { Swords, Users, Bot, Loader2, Trophy, RotateCcw, X, Crosshair, Footprints, Shield, Send, Hand } from 'lucide-react';
 import {
   applyAction,
   initialState,
-  validMoveCells,
+  isValidMove,
   passableTeammates,
-  adjacentEnemies,
+  tacklers,
   inShootRange,
-  COLS,
-  ROWS,
+  shootChance,
+  aiChooseAction,
+  PITCH_W,
+  PITCH_H,
+  GOAL_HALF,
+  GOAL_DEPTH,
+  MOVE_RADIUS,
+  R_PLAYER,
   type MatchState,
   type Team,
+  type Point,
   type Action,
-  aiChooseAction,
 } from '../../lib/tacticsEngine';
 import { firebaseEnabled } from '../../lib/firebase';
 import { findOrCreateMatch, cancelSearch, subscribeMatch, pushMatchState, resetMatch, type MatchDoc } from '../../lib/matchmaking';
@@ -22,12 +28,26 @@ import TacticsProfile from './TacticsProfile';
 
 type Mode = 'menu' | 'local' | 'onlineSearch' | 'online';
 
+// حدود الرسم (مع هامش للمرامي برا الملعب)
+const VB = { x: -5, y: -3, w: PITCH_W + 10, h: PITCH_H + 6 };
+const HIT_R = 5; // نصف قطر منطقة الضغط على لاعب
+
+function dist(a: Point, b: Point) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
 export default function FootballTactics() {
   const [mode, setMode] = useState<Mode>('menu');
   const [name, setName] = useState('');
   const [state, setState] = useState<MatchState>(() => initialState());
   const [selected, setSelected] = useState<number | null>(null);
+  const [passMode, setPassMode] = useState(false);
   const [error, setError] = useState('');
+  const [hint, setHint] = useState('');
   const [myRank, setMyRank] = useState<PlayerRank | null>(null);
   const [reward, setReward] = useState<MatchReward | null>(null);
 
@@ -50,7 +70,7 @@ export default function FootballTactics() {
       const action = aiChooseAction(state, 'away');
       setState((s) => applyAction(s, action, 'away'));
       setSelected(null);
-    }, 550);
+    }, 650);
     return () => clearTimeout(t);
   }, [mode, state]);
 
@@ -95,6 +115,7 @@ export default function FootballTactics() {
     setMode('menu');
     setMatchId(null);
     setSelected(null);
+    setPassMode(false);
     setState(initialState());
     rematchLoggedRef.current = false;
   }
@@ -102,6 +123,8 @@ export default function FootballTactics() {
   function startLocal() {
     setState(initialState());
     setSelected(null);
+    setPassMode(false);
+    setHint('');
     setMode('local');
     rematchLoggedRef.current = false;
   }
@@ -132,39 +155,93 @@ export default function FootballTactics() {
     setMode('menu');
   }
 
-  function act(action: Action, team: Team) {
-    setState((s) => {
-      const next = applyAction(s, action, team);
-      if (mode === 'online' && matchId) pushMatchState(matchId, next);
-      return next;
-    });
-    setSelected(null);
+  const myTeam: Team = mode === 'online' ? role : 'home';
+  const oppTeam: Team = myTeam === 'home' ? 'away' : 'home';
+  // اللاعب اللي بيلعب كـ away بيشوف الملعب مقلوب، عشان فريقه دايمًا يهاجم باتجاه اليمين
+  const flip = mode === 'online' && role === 'away';
+  const toView = (p: Point): Point => (flip ? { x: PITCH_W - p.x, y: PITCH_H - p.y } : p);
+
+  const isMyTurn = state.status === 'playing' && state.turn === myTeam && (mode === 'local' ? myTeam === 'home' : true);
+  const carrierPos = state.positions[state.ballOwner][state.ballIndex];
+
+  const passTargets = isMyTurn ? passableTeammates(state, myTeam) : [];
+  const tackleList = isMyTurn ? tacklers(state, myTeam) : [];
+  const canShoot = isMyTurn && inShootRange(state, myTeam);
+  const shootPct = canShoot ? Math.round(shootChance(state, myTeam) * 100) : 0;
+  const passActive = passMode && passTargets.length > 0;
+  const selPos = selected !== null && isMyTurn ? state.positions[myTeam][selected] : null;
+
+  const equippedItem = ITEMS.find((i) => i.id === myRank?.equipped);
+
+  function act(action: Action) {
+    const next = applyAction(state, action, myTeam);
+    if (next === state) return;
+    setState(next);
+    if (mode === 'online' && matchId) pushMatchState(matchId, next);
+    setPassMode(false);
+    setHint('');
+    // بعد الحركة بنخلي اللاعب محدّد عشان تقدر تحركه مرة ثانية، إلا إذا خلص الدور
+    if (action.type !== 'move' || next.turn !== myTeam || next.status === 'finished') setSelected(null);
   }
 
-  const myTeam: Team = mode === 'online' ? role : 'home';
-  const equippedItem = ITEMS.find((i) => i.id === myRank?.equipped);
-  const ringStyle = equippedItem ? { boxShadow: `inset 0 0 0 2px ${equippedItem.color}` } : undefined;
-  const isMyTurn = state.status === 'playing' && state.turn === myTeam && (mode === 'local' ? myTeam === 'home' : true);
-  const carrier = state.positions[state.ballOwner][state.ballIndex];
+  function doTackle() {
+    if (tackleList.length === 0) return;
+    let idx = selected !== null && tackleList.includes(selected) ? selected : -1;
+    if (idx === -1) {
+      const enemy = state.positions[oppTeam][state.ballIndex];
+      idx = tackleList.reduce((a, b) =>
+        dist(state.positions[myTeam][a], enemy) < dist(state.positions[myTeam][b], enemy) ? a : b
+      );
+    }
+    act({ type: 'tackle', playerIndex: idx });
+  }
 
-  const moveTargets = selected !== null && isMyTurn ? validMoveCells(state, myTeam, selected) : [];
-  const canPassSelected = selected === state.ballIndex && state.ballOwner === myTeam;
-  const passTargets = canPassSelected && isMyTurn ? passableTeammates(state, myTeam) : [];
-  const tackleTargets = isMyTurn && state.ballOwner !== myTeam ? adjacentEnemies(state, myTeam) : [];
-  const canShoot = isMyTurn && state.ballOwner === myTeam && inShootRange(myTeam, carrier) && selected === state.ballIndex;
-
-  function cellClick(r: number, c: number) {
+  function pitchClick(e: ReactMouseEvent<SVGSVGElement>) {
     if (!isMyTurn) return;
-    // clicking own player selects it
-    const ownIdx = state.positions[myTeam].findIndex((p) => p.r === r && p.c === c);
-    if (ownIdx !== -1) {
-      setSelected(ownIdx);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const vx = VB.x + ((e.clientX - rect.left) / rect.width) * VB.w;
+    const vy = VB.y + ((e.clientY - rect.top) / rect.height) * VB.h;
+    const p = toView({ x: vx, y: vy }); // القلب هو معكوس نفسه
+    const mine = state.positions[myTeam];
+    setHint('');
+
+    if (passActive) {
+      const target = passTargets.find((i) => dist(mine[i], p) <= HIT_R);
+      if (target !== undefined) act({ type: 'pass', toPlayerIndex: target });
       return;
     }
-    if (selected !== null) {
-      const target = moveTargets.find((m) => m.r === r && m.c === c);
-      if (target) act({ type: 'move', playerIndex: selected, to: target }, myTeam);
+
+    // اختيار لاعب من فريقك (بياخد الأقرب لمكان الضغط)
+    let own = -1;
+    let best = HIT_R;
+    mine.forEach((pt, i) => {
+      const d = dist(pt, p);
+      if (d <= best) {
+        best = d;
+        own = i;
+      }
+    });
+    if (own !== -1) {
+      setSelected(own === selected ? null : own);
+      return;
     }
+
+    if (selected === null) {
+      setHint('دوس على لاعبك أول');
+      return;
+    }
+    const from = mine[selected];
+    if (state.ap <= 0) return;
+    if (dist(from, p) > MOVE_RADIUS) {
+      setHint('بعيد كتير، دوس جوا الدايرة');
+      return;
+    }
+    const to = { x: clamp(p.x, 0, PITCH_W), y: clamp(p.y, 0, PITCH_H) };
+    if (!isValidMove(state, myTeam, selected, to)) {
+      setHint('مكان غير صالح، قريب كتير من لاعب ثاني');
+      return;
+    }
+    act({ type: 'move', playerIndex: selected, to });
   }
 
   return (
@@ -174,7 +251,7 @@ export default function FootballTactics() {
           <div className="text-center">
             <Swords className="w-10 h-10 mx-auto text-emerald-400 mb-2" />
             <h3 className="font-display font-bold text-xl">تكتيكات الكورة</h3>
-            <p className="text-gray-400 text-sm mt-1">لعبة أدوار: حرّك، مرّر، سدّد، واستخلص الكرة</p>
+            <p className="text-gray-400 text-sm mt-1">لعبة أدوار: حرّك لاعبينك بحرية، مرّر، سدّد من بعيد، واستخلص الكرة</p>
           </div>
           <input
             value={name}
@@ -242,66 +319,145 @@ export default function FootballTactics() {
             <span>نقاط الحركة: {state.ap}</span>
           </div>
 
-          <div
-            className="grid gap-[2px] bg-emerald-950/40 p-2 rounded-xl border border-emerald-500/20"
-            style={{ gridTemplateColumns: `repeat(${COLS}, minmax(0,1fr))`, width: '100%', maxWidth: 440 }}
+          {/* الملعب */}
+          <svg
+            viewBox={`${VB.x} ${VB.y} ${VB.w} ${VB.h}`}
+            onClick={pitchClick}
+            className={`w-full rounded-xl border border-emerald-500/20 select-none ${isMyTurn ? 'cursor-pointer' : ''}`}
+            style={{ aspectRatio: `${VB.w} / ${VB.h}`, maxWidth: 560, direction: 'ltr', touchAction: 'manipulation' }}
           >
-            {Array.from({ length: ROWS }).map((_, r) =>
-              Array.from({ length: COLS }).map((_, c) => {
-                const homeIdx = state.positions.home.findIndex((p) => p.r === r && p.c === c);
-                const awayIdx = state.positions.away.findIndex((p) => p.r === r && p.c === c);
-                const isBall =
-                  (state.ballOwner === 'home' && homeIdx === state.ballIndex) ||
-                  (state.ballOwner === 'away' && awayIdx === state.ballIndex);
-                const isGoalCol = c === 0 || c === COLS - 1;
-                const isGoalCell = isGoalCol && [2, 3, 4].includes(r);
-                const isMoveTarget = moveTargets.some((m) => m.r === r && m.c === c);
-                const isSelected = selected !== null && state.positions[myTeam][selected]?.r === r && state.positions[myTeam][selected]?.c === c;
-                const passIdx = state.positions[myTeam].findIndex((p, i) => passTargets.includes(i) && p.r === r && p.c === c);
-                const tackleIdx = state.positions[myTeam === 'home' ? 'away' : 'home'].findIndex(
-                  (p, i) => tackleTargets.includes(i) && p.r === r && p.c === c
-                );
+            <rect x={VB.x} y={VB.y} width={VB.w} height={VB.h} fill="#052e1a" />
+            {Array.from({ length: 10 }).map((_, i) => (
+              <rect key={i} x={i * 10} y={0} width={10} height={PITCH_H} fill={i % 2 ? '#14532d' : '#166534'} />
+            ))}
 
-                let content = null;
-                if (homeIdx !== -1) content = <div style={myTeam === 'home' ? ringStyle : undefined} className="w-full h-full rounded-full bg-cyan-500 flex items-center justify-center text-[9px] font-bold text-white">{homeIdx + 1}</div>;
-                if (awayIdx !== -1) content = <div style={myTeam === 'away' ? ringStyle : undefined} className="w-full h-full rounded-full bg-rose-500 flex items-center justify-center text-[9px] font-bold text-white">{awayIdx + 1}</div>;
+            {/* خطوط الملعب */}
+            <g fill="none" stroke="rgba(255,255,255,0.45)" strokeWidth={0.5}>
+              <rect x={0} y={0} width={PITCH_W} height={PITCH_H} />
+              <line x1={PITCH_W / 2} y1={0} x2={PITCH_W / 2} y2={PITCH_H} />
+              <circle cx={PITCH_W / 2} cy={PITCH_H / 2} r={9} />
+              <rect x={0} y={PITCH_H / 2 - 20} width={16} height={40} />
+              <rect x={PITCH_W - 16} y={PITCH_H / 2 - 20} width={16} height={40} />
+            </g>
+            <circle cx={PITCH_W / 2} cy={PITCH_H / 2} r={0.9} fill="rgba(255,255,255,0.6)" />
 
+            {/* المرامي ومنطقة التسجيل */}
+            <g fill="rgba(250,204,21,0.25)" stroke="#facc15" strokeWidth={0.5}>
+              <rect x={-3} y={PITCH_H / 2 - GOAL_HALF} width={3} height={GOAL_HALF * 2} />
+              <rect x={PITCH_W} y={PITCH_H / 2 - GOAL_HALF} width={3} height={GOAL_HALF * 2} />
+            </g>
+            <g fill="rgba(250,204,21,0.12)">
+              <rect x={0} y={PITCH_H / 2 - GOAL_HALF} width={GOAL_DEPTH} height={GOAL_HALF * 2} />
+              <rect x={PITCH_W - GOAL_DEPTH} y={PITCH_H / 2 - GOAL_HALF} width={GOAL_DEPTH} height={GOAL_HALF * 2} />
+            </g>
+
+            {/* دايرة الحركة للاعب المحدّد */}
+            {selPos && state.ap > 0 && !passActive && (() => {
+              const v = toView(selPos);
+              return (
+                <circle
+                  cx={v.x}
+                  cy={v.y}
+                  r={MOVE_RADIUS}
+                  fill="rgba(34,211,238,0.10)"
+                  stroke="rgba(103,232,249,0.65)"
+                  strokeWidth={0.4}
+                  strokeDasharray="1.5 1.5"
+                  pointerEvents="none"
+                />
+              );
+            })()}
+
+            {/* اللاعبين */}
+            {(['home', 'away'] as Team[]).flatMap((t) =>
+              state.positions[t].map((p, i) => {
+                const v = toView(p);
+                const mine = t === myTeam;
+                const isSel = mine && selected === i;
+                const isPassTarget = mine && passActive && passTargets.includes(i);
+                const isTackler = mine && tackleList.includes(i) && !passActive;
+                const stroke = isSel ? '#ffffff' : mine && equippedItem ? equippedItem.color : 'rgba(255,255,255,0.35)';
+                const strokeW = isSel ? 1.1 : mine && equippedItem ? 1.2 : 0.5;
                 return (
-                  <button
-                    key={`${r}-${c}`}
-                    onClick={() => {
-                      if (passIdx !== -1 && canPassSelected && isMyTurn) act({ type: 'pass', toPlayerIndex: passIdx }, myTeam);
-                      else if (tackleIdx !== -1 && isMyTurn) act({ type: 'tackle', playerIndex: tackleIdx }, myTeam);
-                      else cellClick(r, c);
-                    }}
-                    className={`relative aspect-square flex items-center justify-center rounded-[3px] ${
-                      isGoalCell ? 'bg-yellow-500/10' : 'bg-emerald-900/40'
-                    } ${isSelected ? 'ring-2 ring-white' : ''} ${isMoveTarget ? 'ring-2 ring-cyan-300/70' : ''} ${
-                      passIdx !== -1 ? 'ring-2 ring-yellow-300' : ''
-                    } ${tackleIdx !== -1 ? 'ring-2 ring-red-400' : ''}`}
+                  <g
+                    key={`${t}-${i}`}
+                    style={{ transform: `translate(${v.x}px, ${v.y}px)`, transition: 'transform 350ms ease' }}
                   >
-                    {content}
-                    {isBall && <span className="absolute -bottom-0.5 -right-0.5 text-[10px]">⚽</span>}
-                  </button>
+                    {isPassTarget && <circle r={R_PLAYER + 1.8} fill="none" stroke="#fde047" strokeWidth={0.7} />}
+                    {isTackler && (
+                      <circle r={R_PLAYER + 1.8} fill="none" stroke="#f87171" strokeWidth={0.6} strokeDasharray="1 1" />
+                    )}
+                    <circle r={R_PLAYER} fill={t === 'home' ? '#06b6d4' : '#f43f5e'} stroke={stroke} strokeWidth={strokeW} />
+                    <text
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fontSize={3.4}
+                      fontWeight={700}
+                      fill="#ffffff"
+                      style={{ pointerEvents: 'none' }}
+                    >
+                      {i + 1}
+                    </text>
+                  </g>
                 );
               })
             )}
-          </div>
 
-          <p className="text-xs text-gray-400 h-4">{state.lastEvent}</p>
+            {/* الكرة */}
+            {(() => {
+              const bv = toView(carrierPos);
+              const bx = bv.x + (state.ballOwner === myTeam ? 3.8 : -3.8);
+              return (
+                <g style={{ transform: `translate(${bx}px, ${bv.y + 1.4}px)`, transition: 'transform 350ms ease' }}>
+                  <circle r={1.7} fill="#ffffff" stroke="#111827" strokeWidth={0.4} />
+                </g>
+              );
+            })()}
+          </svg>
+
+          <p className="text-xs text-gray-400 min-h-4">{hint || state.lastEvent}</p>
 
           {isMyTurn && state.status === 'playing' && (
-            <div className="flex items-center gap-2 flex-wrap justify-center">
-              {canShoot && (
-                <button onClick={() => act({ type: 'shoot' }, myTeam)} className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-yellow-400/40 text-yellow-300">
-                  <Crosshair className="w-3.5 h-3.5" /> تسديد
+            <div className="flex flex-col items-center gap-2 w-full">
+              <div className="flex items-center gap-2 flex-wrap justify-center">
+                {canShoot && (
+                  <button
+                    onClick={() => act({ type: 'shoot' })}
+                    className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-yellow-400/40 text-yellow-300"
+                  >
+                    <Crosshair className="w-3.5 h-3.5" /> تسديد ({shootPct}%)
+                  </button>
+                )}
+                {passTargets.length > 0 && (
+                  <button
+                    onClick={() => setPassMode((v) => !v)}
+                    className={`glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border ${
+                      passActive ? 'border-yellow-300 text-yellow-200 bg-yellow-400/10' : 'border-slate-600'
+                    }`}
+                  >
+                    <Send className="w-3.5 h-3.5" /> تمرير
+                  </button>
+                )}
+                {tackleList.length > 0 && (
+                  <button
+                    onClick={doTackle}
+                    className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-red-400/40 text-red-300"
+                  >
+                    <Hand className="w-3.5 h-3.5" /> استخلاص
+                  </button>
+                )}
+                <button
+                  onClick={() => act({ type: 'endTurn' })}
+                  className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-slate-600"
+                >
+                  <Footprints className="w-3.5 h-3.5" /> إنهاء الدور
                 </button>
-              )}
-              <button onClick={() => act({ type: 'endTurn' }, myTeam)} className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-slate-600">
-                <Footprints className="w-3.5 h-3.5" /> إنهاء الدور
-              </button>
-              <span className="text-[11px] text-gray-500 flex items-center gap-1">
-                <Shield className="w-3 h-3" /> دوس لاعبك، بعدين دوس خانة فاضية للحركة، لاعب أصفر للتمرير، أو خصم أحمر للاستخلاص
+              </div>
+              <span className="text-[11px] text-gray-500 flex items-center gap-1 text-center">
+                <Shield className="w-3 h-3 shrink-0" />
+                {passActive
+                  ? 'دوس على زميلك اللي محوّط بأصفر عشان تمرّر له'
+                  : 'دوس لاعبك، بعدين دوس أي مكان جوا الدايرة لتحرّكه. للتسجيل: سدّد أو ادخل بالكرة لمنطقة المرمى'}
               </span>
             </div>
           )}
