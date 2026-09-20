@@ -1,6 +1,6 @@
 import { doc, getDoc, setDoc, updateDoc, runTransaction, collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
 import { db, ensureSignedIn } from './firebase';
-import { DUPLICATE_XP, ITEMS, levelFromXp, matchXp, rollItem, type Item } from './progression';
+import { DUPLICATE_XP, ITEMS, levelFromXp, matchXp, rollItem, type Item, type ItemKind } from './progression';
 
 export type PlayerRank = {
   name: string;
@@ -11,7 +11,8 @@ export type PlayerRank = {
   xp?: number;
   chests?: number;
   unlocked?: string[];
-  equipped?: string | null;
+  equipped?: string | null; // الإطار الملوّن
+  equippedBoost?: string | null; // بطاقة التعزيز
 };
 
 export type MatchReward = { xpGain: number; levelBefore: number; levelAfter: number; chestsGained: number };
@@ -62,6 +63,7 @@ export async function recordResult(
     chests: (current.chests ?? 0) + chestsGained,
     unlocked: current.unlocked ?? [],
     equipped: current.equipped ?? null,
+    equippedBoost: current.equippedBoost ?? null,
   });
 
   return { xpGain, levelBefore, levelAfter, chestsGained };
@@ -93,12 +95,12 @@ export async function openChest(): Promise<ChestResult | null> {
   });
 }
 
-export async function equipItem(itemId: string | null) {
+export async function equipItem(itemId: string | null, kind: ItemKind) {
   if (!db) return;
   const uid = await ensureSignedIn();
   if (!uid) return;
-  if (itemId !== null && !ITEMS.some((i) => i.id === itemId)) return;
-  await updateDoc(doc(db, 'tacticsPlayers', uid), { equipped: itemId });
+  if (itemId !== null && !ITEMS.some((i) => i.id === itemId && i.kind === kind)) return;
+  await updateDoc(doc(db, 'tacticsPlayers', uid), { [kind === 'boost' ? 'equippedBoost' : 'equipped']: itemId });
 }
 
 export async function getMyRank(): Promise<PlayerRank | null> {

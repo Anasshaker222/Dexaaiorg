@@ -8,12 +8,14 @@ import {
   tacklers,
   inShootRange,
   shootChance,
+  tackleChance,
+  moveRadius,
   aiChooseAction,
+  NO_BOOST,
   PITCH_W,
   PITCH_H,
   GOAL_HALF,
   GOAL_DEPTH,
-  MOVE_RADIUS,
   R_PLAYER,
   type MatchState,
   type Team,
@@ -23,7 +25,7 @@ import {
 import { firebaseEnabled } from '../../lib/firebase';
 import { findOrCreateMatch, cancelSearch, subscribeMatch, pushMatchState, resetMatch, type MatchDoc } from '../../lib/matchmaking';
 import { recordResult, getMyRank, type PlayerRank, type MatchReward } from '../../lib/ranking';
-import { ITEMS } from '../../lib/progression';
+import { ITEMS, boostFor, boostName } from '../../lib/progression';
 import TacticsProfile from './TacticsProfile';
 
 type Mode = 'menu' | 'local' | 'onlineSearch' | 'online';
@@ -120,8 +122,14 @@ export default function FootballTactics() {
     rematchLoggedRef.current = false;
   }
 
+  // بطاقة التعزيز المجهّزة (بس إذا كانت مفتوحة عند اللاعب فعلاً)
+  function myBoostId(): string | null {
+    const id = myRank?.equippedBoost ?? null;
+    return id && myRank?.unlocked?.includes(id) ? id : null;
+  }
+
   function startLocal() {
-    setState(initialState());
+    setState(initialState('home', { home: boostFor(myBoostId()), away: NO_BOOST }));
     setSelected(null);
     setPassMode(false);
     setHint('');
@@ -137,7 +145,7 @@ export default function FootballTactics() {
     }
     setMode('onlineSearch');
     try {
-      const { matchId: id, role: r } = await findOrCreateMatch(name.trim(), () => {});
+      const { matchId: id, role: r } = await findOrCreateMatch(name.trim(), () => {}, myBoostId());
       setMatchId(id);
       setRole(r);
       setMode('online');
@@ -163,6 +171,8 @@ export default function FootballTactics() {
 
   const isMyTurn = state.status === 'playing' && state.turn === myTeam && (mode === 'local' ? myTeam === 'home' : true);
   const carrierPos = state.positions[state.ballOwner][state.ballIndex];
+  const myMoveRadius = moveRadius(state, myTeam);
+  const tacklePct = Math.round(tackleChance(state, myTeam) * 100);
 
   const passTargets = isMyTurn ? passableTeammates(state, myTeam) : [];
   const tackleList = isMyTurn ? tacklers(state, myTeam) : [];
@@ -232,7 +242,7 @@ export default function FootballTactics() {
     }
     const from = mine[selected];
     if (state.ap <= 0) return;
-    if (dist(from, p) > MOVE_RADIUS) {
+    if (dist(from, p) > myMoveRadius) {
       setHint('بعيد كتير، دوس جوا الدايرة');
       return;
     }
@@ -311,6 +321,14 @@ export default function FootballTactics() {
             </div>
           </div>
 
+          {(state.boosts?.home.id || state.boosts?.away.id) && (
+            <div className="flex items-center gap-3 text-[11px] text-gray-500">
+              <span>⚡ بطاقتك: {boostName(state.boosts?.[myTeam].id)}</span>
+              <span>•</span>
+              <span>بطاقة الخصم: {boostName(state.boosts?.[oppTeam].id)}</span>
+            </div>
+          )}
+
           <div className="flex items-center gap-3 text-xs text-gray-400">
             <span>الدور {state.round + 1} / 30</span>
             <span>•</span>
@@ -358,7 +376,7 @@ export default function FootballTactics() {
                 <circle
                   cx={v.x}
                   cy={v.y}
-                  r={MOVE_RADIUS}
+                  r={myMoveRadius}
                   fill="rgba(34,211,238,0.10)"
                   stroke="rgba(103,232,249,0.65)"
                   strokeWidth={0.4}
@@ -443,7 +461,7 @@ export default function FootballTactics() {
                     onClick={doTackle}
                     className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-red-400/40 text-red-300"
                   >
-                    <Hand className="w-3.5 h-3.5" /> استخلاص
+                    <Hand className="w-3.5 h-3.5" /> استخلاص ({tacklePct}%)
                   </button>
                 )}
                 <button
@@ -493,7 +511,7 @@ export default function FootballTactics() {
                 )}
                 {mode === 'online' && matchId && (
                   <button
-                    onClick={() => resetMatch(matchId, role === 'home' ? 'away' : 'home')}
+                    onClick={() => resetMatch(matchId, role === 'home' ? 'away' : 'home', state.boosts)}
                     className="glass card-hover rounded-lg px-4 py-2 text-sm flex items-center gap-1 border border-slate-700/50"
                   >
                     <RotateCcw className="w-4 h-4" /> مباراة ثانية بنفس الخصم

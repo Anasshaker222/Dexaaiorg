@@ -22,6 +22,18 @@ export const MAX_GOALS = 3; // أول فريق يوصل 3 أهداف بيكسب 
 export type Team = 'home' | 'away';
 export type Point = { x: number; y: number };
 
+/** بطاقة تعزيز بتأثر على اللعب لفريق واحد (بتيجي من الصناديق). القيم كلها إضافات صغيرة. */
+export type Boost = {
+  id: string | null;
+  move: number; // + على مدى الحركة
+  pass: number; // + على مدى التمرير
+  shoot: number; // + على احتمال نجاح التسديد (0.05 = 5%)
+  tackle: number; // + على احتمال نجاح استخلاصك
+  guard: number; // - على احتمال نجاح استخلاص الخصم عليك
+};
+
+export const NO_BOOST: Boost = { id: null, move: 0, pass: 0, shoot: 0, tackle: 0, guard: 0 };
+
 export type MatchState = {
   positions: Record<Team, Point[]>; // 5 لاعبين بكل فريق
   ballOwner: Team;
@@ -33,6 +45,7 @@ export type MatchState = {
   status: 'playing' | 'finished';
   winner: Team | 'draw' | null;
   lastEvent: string;
+  boosts?: Record<Team, Boost>; // اختياري: المباريات القديمة ما فيها بطاقات
 };
 
 export type Action =
@@ -93,7 +106,26 @@ function formation(team: Team): Point[] {
   return base.map((p) => ({ x: PITCH_W - p.x, y: p.y }));
 }
 
-export function initialState(kickoff: Team = 'home'): MatchState {
+function boostOf(state: MatchState, team: Team): Boost {
+  return state.boosts?.[team] ?? NO_BOOST;
+}
+
+/** مدى حركة الفريق (مع البطاقة). */
+export function moveRadius(state: MatchState, team: Team): number {
+  return MOVE_RADIUS + boostOf(state, team).move;
+}
+
+/** مدى تمرير الفريق (مع البطاقة). */
+export function passRange(state: MatchState, team: Team): number {
+  return PASS_RANGE + boostOf(state, team).pass;
+}
+
+/** احتمال نجاح استخلاص الفريق للكرة (مع بطاقته وبطاقة حامل الكرة). */
+export function tackleChance(state: MatchState, team: Team): number {
+  return clamp(0.5 + boostOf(state, team).tackle - boostOf(state, opp(team)).guard, 0.2, 0.8);
+}
+
+export function initialState(kickoff: Team = 'home', boosts?: Record<Team, Boost>): MatchState {
   return {
     positions: { home: formation('home'), away: formation('away') },
     ballOwner: kickoff,
@@ -105,6 +137,7 @@ export function initialState(kickoff: Team = 'home'): MatchState {
     status: 'playing',
     winner: null,
     lastEvent: 'انطلاق المباراة',
+    boosts: boosts ?? { home: NO_BOOST, away: NO_BOOST },
   };
 }
 
@@ -142,7 +175,7 @@ export function isValidMove(state: MatchState, team: Team, playerIndex: number, 
   if (!from) return false;
   if (!(to.x >= 0 && to.x <= PITCH_W && to.y >= 0 && to.y <= PITCH_H)) return false;
   const d = dist(from, to);
-  if (d > MOVE_RADIUS + 1e-6 || d < 1) return false;
+  if (d > moveRadius(state, team) + 1e-6 || d < 1) return false;
   const scoring = state.ballOwner === team && state.ballIndex === playerIndex && inGoalMouth(team, to);
   if (scoring) return true;
   for (const t of ['home', 'away'] as Team[]) {
@@ -179,8 +212,8 @@ export function shootChance(state: MatchState, team: Team): number {
   const blockers = defenders.filter(
     (p) => distToSegment(p, carrier, gc) <= 3.5 && dist(p, gc) < dist(carrier, gc)
   ).length;
-  chance -= 0.12 * near + 0.1 * blockers;
-  return clamp(chance, 0.05, 0.65);
+  chance += boostOf(state, team).shoot - 0.12 * near - 0.1 * blockers;
+  return clamp(chance, 0.05, 0.8);
 }
 
 export function passableTeammates(state: MatchState, team: Team): number[] {
@@ -188,7 +221,7 @@ export function passableTeammates(state: MatchState, team: Team): number[] {
   const carrier = state.positions[team][state.ballIndex];
   return state.positions[team]
     .map((_, i) => i)
-    .filter((i) => i !== state.ballIndex && dist(state.positions[team][i], carrier) <= PASS_RANGE);
+    .filter((i) => i !== state.ballIndex && dist(state.positions[team][i], carrier) <= passRange(state, team));
 }
 
 /** لاعبين فريقك اللي بيقدروا يستخلصوا الكرة (قريبين من حامل الكرة الخصم). */
@@ -262,7 +295,7 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
 
   if (action.type === 'tackle') {
     if (!tacklers(state, actingTeam).includes(action.playerIndex)) return state;
-    const success = Math.random() < 0.5;
+    const success = Math.random() < tackleChance(state, actingTeam);
     next.ap -= 1;
     if (success) {
       next.lastEvent = 'استخلاص ناجح للكرة!';
@@ -285,7 +318,7 @@ function stepToward(state: MatchState, team: Team, idx: number, target: Point): 
   const d = dist(from, target);
   if (d < 1) return null;
   const baseAngle = Math.atan2(target.y - from.y, target.x - from.x);
-  const step = Math.min(MOVE_RADIUS, d);
+  const step = Math.min(moveRadius(state, team), d);
   for (const scale of [1, 0.75, 0.5]) {
     for (const off of [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2]) {
       const a = baseAngle + off;

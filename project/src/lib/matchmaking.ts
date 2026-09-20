@@ -13,7 +13,8 @@ import {
   limit,
 } from 'firebase/firestore';
 import { db, ensureSignedIn } from './firebase';
-import { initialState, type MatchState, type Team } from './tacticsEngine';
+import { initialState, type MatchState, type Team, type Boost } from './tacticsEngine';
+import { boostFor } from './progression';
 
 export type MatchDoc = {
   home: string;
@@ -28,7 +29,8 @@ export type MatchDoc = {
  * بالدور وبيستنى لحد ما حدا ينضم إله. بيرجّع matchId وrole (home/away). */
 export async function findOrCreateMatch(
   displayName: string,
-  onWaiting: () => void
+  onWaiting: () => void,
+  myBoostId: string | null = null
 ): Promise<{ matchId: string; role: Team }> {
   if (!db) throw new Error('اللعب أونلاين غير مفعّل حاليًا');
   const firestore = db;
@@ -51,7 +53,10 @@ export async function findOrCreateMatch(
         away: uid,
         homeName: freshCandidate.data().name || 'لاعب',
         awayName: displayName || 'لاعب',
-        state: initialState('home'),
+        state: initialState('home', {
+          home: boostFor(freshCandidate.data().boost),
+          away: boostFor(myBoostId),
+        }),
         rematch: { home: false, away: false },
       };
       tx.set(matchRef, { ...initial, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
@@ -66,6 +71,7 @@ export async function findOrCreateMatch(
   await setDoc(doc(firestore, 'tacticsQueue', uid), {
     name: displayName || 'لاعب',
     status: 'waiting',
+    boost: myBoostId,
     matchId: null,
     createdAt: serverTimestamp(),
   });
@@ -116,11 +122,11 @@ export async function requestRematch(matchId: string, role: Team) {
   await updateDoc(doc(firestore, 'tacticsMatches', matchId), { [`rematch.${role}`]: true });
 }
 
-export async function resetMatch(matchId: string, kickoff: Team) {
+export async function resetMatch(matchId: string, kickoff: Team, boosts?: Record<Team, Boost>) {
   if (!db) return;
   const firestore = db;
   await updateDoc(doc(firestore, 'tacticsMatches', matchId), {
-    state: initialState(kickoff),
+    state: initialState(kickoff, boosts),
     rematch: { home: false, away: false },
     updatedAt: serverTimestamp(),
   });
