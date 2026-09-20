@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // طابور انتظار الخصوم
+    match /tacticsQueue/{uid} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // المباريات: أي واحد بالمباراة (home/away) يقدر يقرا ويحدّث
+    match /tacticsMatches/{matchId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null &&
+        (request.auth.uid == resource.data.home || request.auth.uid == resource.data.away);
+    }
+
+    // تصنيف اللاعبين: كل واحد يقدر يعدّل سجله هوي بس
+    match /tacticsPlayers/{uid} {
+      allow read: if true;
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}

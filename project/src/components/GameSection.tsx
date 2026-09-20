@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Cpu, Brain, Zap, Grid3x3, Crosshair, Car, Goal, Gamepad, Blocks, Disc, Hammer, Rocket, Bomb, Bird, Box, Map as MapIcon, ArrowUpCircle, Flag, Target } from 'lucide-react';
+import { X, Cpu, Brain, Zap, Grid3x3, Crosshair, Car, Goal, Gamepad, Blocks, Disc, Hammer, Rocket, Bomb, Bird, Box, Map as MapIcon, ArrowUpCircle, Flag, Target, Swords } from 'lucide-react';
 import TicTacToe from './games/TicTacToe';
 import MemoryMatch from './games/MemoryMatch';
 import ReactionTime from './games/ReactionTime';
@@ -7,6 +7,7 @@ import Game2048 from './games/Game2048';
 import FiringRange from './games/FiringRange';
 import RacingGame from './games/RacingGame';
 import FootballGame from './games/FootballGame';
+import FootballTactics from './games/FootballTactics';
 import SnakeGame from './games/SnakeGame';
 import BrickBreaker from './games/BrickBreaker';
 import PongGame from './games/PongGame';
@@ -22,7 +23,7 @@ import SkyJump3D from './games/SkyJump3D';
 import DriftRacer3D from './games/DriftRacer3D';
 import TargetDome3D from './games/TargetDome3D';
 
-type GameId = 'tictactoe' | 'memory' | 'reaction' | '2048' | 'firing' | 'racing' | 'football' | 'snake' | 'brick' | 'pong' | 'whack' | 'invaders' | 'tetris' | 'mines' | 'flappy' | 'tunnel3d' | 'asteroid3d' | 'maze3d' | 'skyjump3d' | 'drift3d' | 'targetdome3d';
+type GameId = 'tictactoe' | 'memory' | 'reaction' | '2048' | 'firing' | 'racing' | 'football' | 'tactics' | 'snake' | 'brick' | 'pong' | 'whack' | 'invaders' | 'tetris' | 'mines' | 'flappy' | 'tunnel3d' | 'asteroid3d' | 'maze3d' | 'skyjump3d' | 'drift3d' | 'targetdome3d';
 
 type GameMeta = {
   id: GameId;
@@ -89,6 +90,14 @@ const GAMES: GameMeta[] = [
     icon: Goal,
     color: 'pink',
     tag: 'Sports',
+  },
+  {
+    id: 'tactics',
+    title: 'Football Tactics',
+    description: 'Turn-based tactical football. Move, pass, shoot and tackle — play a training match vs AI or challenge a real opponent online.',
+    icon: Swords,
+    color: 'green',
+    tag: 'Multiplayer',
   },
   {
     id: 'snake',
@@ -302,6 +311,7 @@ export default function GameSection() {
               {activeGame === 'firing' && <FiringRange />}
               {activeGame === 'racing' && <RacingGame />}
               {activeGame === 'football' && <FootballGame />}
+              {activeGame === 'tactics' && <FootballTactics />}
               {activeGame === 'snake' && <SnakeGame />}
               {activeGame === 'brick' && <BrickBreaker />}
               {activeGame === 'pong' && <PongGame />}
