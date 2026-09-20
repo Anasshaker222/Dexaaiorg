@@ -16,7 +16,9 @@ import {
 } from '../../lib/tacticsEngine';
 import { firebaseEnabled } from '../../lib/firebase';
 import { findOrCreateMatch, cancelSearch, subscribeMatch, pushMatchState, resetMatch, type MatchDoc } from '../../lib/matchmaking';
-import { recordResult, getMyRank, type PlayerRank } from '../../lib/ranking';
+import { recordResult, getMyRank, type PlayerRank, type MatchReward } from '../../lib/ranking';
+import { ITEMS } from '../../lib/progression';
+import TacticsProfile from './TacticsProfile';
 
 type Mode = 'menu' | 'local' | 'onlineSearch' | 'online';
 
@@ -27,6 +29,7 @@ export default function FootballTactics() {
   const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [myRank, setMyRank] = useState<PlayerRank | null>(null);
+  const [reward, setReward] = useState<MatchReward | null>(null);
 
   // online-specific
   const [matchId, setMatchId] = useState<string | null>(null);
@@ -68,8 +71,25 @@ export default function FootballTactics() {
     rematchLoggedRef.current = true;
     const my = state.score[role];
     const opp = state.score[role === 'home' ? 'away' : 'home'];
-    recordResult(name || 'لاعب', my, opp, 1000).then(() => getMyRank().then(setMyRank));
+    recordResult(name || 'لاعب', my, opp, 1000)
+      .then((r) => {
+        setReward(r);
+        return getMyRank().then(setMyRank);
+      })
+      .catch(() => {});
   }, [mode, state.status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // لما تبدأ مباراة جديدة (مثلاً "مباراة ثانية بنفس الخصم") لازم نسمح بتسجيل نتيجتها من جديد
+  useEffect(() => {
+    if (state.status === 'playing') {
+      rematchLoggedRef.current = false;
+      setReward(null);
+    }
+  }, [state.status]);
+
+  function refreshRank() {
+    getMyRank().then(setMyRank).catch(() => {});
+  }
 
   function backToMenu() {
     setMode('menu');
@@ -122,6 +142,8 @@ export default function FootballTactics() {
   }
 
   const myTeam: Team = mode === 'online' ? role : 'home';
+  const equippedItem = ITEMS.find((i) => i.id === myRank?.equipped);
+  const ringStyle = equippedItem ? { boxShadow: `inset 0 0 0 2px ${equippedItem.color}` } : undefined;
   const isMyTurn = state.status === 'playing' && state.turn === myTeam && (mode === 'local' ? myTeam === 'home' : true);
   const carrier = state.positions[state.ballOwner][state.ballIndex];
 
@@ -166,6 +188,7 @@ export default function FootballTactics() {
               تصنيفك الحالي: <span className="text-emerald-400 font-bold">{myRank.elo}</span> — {myRank.wins} فوز / {myRank.losses} خسارة / {myRank.draws} تعادل
             </div>
           )}
+          {firebaseEnabled && <TacticsProfile rank={myRank} onRefresh={refreshRank} />}
           <button
             onClick={startLocal}
             className="glass card-hover rounded-xl px-4 py-3 flex items-center justify-center gap-2 border border-slate-700/50 font-semibold"
@@ -240,8 +263,8 @@ export default function FootballTactics() {
                 );
 
                 let content = null;
-                if (homeIdx !== -1) content = <div className="w-full h-full rounded-full bg-cyan-500 flex items-center justify-center text-[9px] font-bold text-white">{homeIdx + 1}</div>;
-                if (awayIdx !== -1) content = <div className="w-full h-full rounded-full bg-rose-500 flex items-center justify-center text-[9px] font-bold text-white">{awayIdx + 1}</div>;
+                if (homeIdx !== -1) content = <div style={myTeam === 'home' ? ringStyle : undefined} className="w-full h-full rounded-full bg-cyan-500 flex items-center justify-center text-[9px] font-bold text-white">{homeIdx + 1}</div>;
+                if (awayIdx !== -1) content = <div style={myTeam === 'away' ? ringStyle : undefined} className="w-full h-full rounded-full bg-rose-500 flex items-center justify-center text-[9px] font-bold text-white">{awayIdx + 1}</div>;
 
                 return (
                   <button
@@ -293,6 +316,19 @@ export default function FootballTactics() {
                   ? 'فزت بالمباراة! 🎉'
                   : 'خسرت هالمرة، حظ أوفر'}
               </p>
+              {mode === 'online' && reward && (
+                <div className="text-center text-xs text-gray-300 flex flex-col gap-1">
+                  <span className="text-emerald-400 font-bold">+{reward.xpGain} XP</span>
+                  {reward.levelAfter > reward.levelBefore && (
+                    <span className="text-yellow-300 font-bold">ارتفع مستواك إلى {reward.levelAfter}! 🎉</span>
+                  )}
+                  {reward.chestsGained > 0 && (
+                    <span className="text-purple-300">
+                      🎁 ربحت {reward.chestsGained} {reward.chestsGained === 1 ? 'صندوق' : 'صناديق'} — افتحهم من القائمة الرئيسية
+                    </span>
+                  )}
+                </div>
+              )}
               <div className="flex gap-2">
                 {mode === 'local' && (
                   <button onClick={startLocal} className="glass card-hover rounded-lg px-4 py-2 text-sm flex items-center gap-1 border border-slate-700/50">
