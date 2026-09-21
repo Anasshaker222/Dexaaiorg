@@ -18,6 +18,7 @@ export const MAX_SHOOT_DIST = 100; // أقصى مسافة للتسديد عن م
 export const AP_PER_TURN = 2;
 export const MAX_GOALS = 2; // أول فريق يوصل هدفين بيكسب فورًا
 export const TEAM_SIZE = 11; // 11 ضد 11
+export const AUTO_STEP = 3; // أقصى مسافة بيتحركها اللاعب الغير متحكم فيه تلقائيًا بكل حركة
 
 // وقت المباراة الكلي ووقت كل دور - بيتحكم فيهم المكوّن (مش المحرك نفسه، لأنه المحرك نقي
 // وما بيعرف الوقت الحقيقي)، بس القيم مركزية هون حتى تنقرا بمكان وحد.
@@ -173,6 +174,52 @@ function boostOf(state: MatchState, team: Team): Boost {
   return state.boosts?.[team] ?? NO_BOOST;
 }
 
+/** المكان "المثالي" للاعب رقم i بفريق team: مكانه بالتشكيلة الأصلية، منزاح شوي باتجاه
+ * الكرة (الفريق كله بيتحرك زي وحدة وحدة لقدام وهو بيهاجم ولورا وهو بيدافع، بدل ما يضل
+ * واقف مكانه لحد ما توصله الكرة أو يجي دوره). الحارس ما بينزاح كتير عن مرماه. */
+function targetSlot(state: MatchState, team: Team, i: number): Point {
+  const f = state.formations?.[team] ?? DEFAULT_FORMATION;
+  const base = formation(team, f)[i];
+  if (!base) return { x: PITCH_W / 2, y: PITCH_H / 2 };
+  if (i === 0) return base; // الحارس يضل قريب من مرماه
+  const ball = state.positions[state.ballOwner][state.ballIndex];
+  const blend = 0.28;
+  return {
+    x: clamp(base.x * (1 - blend) + ball.x * blend, 4, PITCH_W - 4),
+    y: clamp(base.y * (1 - blend) + ball.y * blend * 0.5, 4, PITCH_H - 4),
+  };
+}
+
+/** بتحرّك كل لاعب ما عدا اللي انحرك بالحركة الحالية (وحامل الكرة، إلا إذا هو نفسه المستثنى)
+ * خطوة صغيرة تلقائية باتجاه مكانه "المثالي"، عشان الملعب كله يبين حي ومتحرك زي مباراة
+ * كورة حقيقية - مش شطرنج بتحرك فيه لاعب واحد بس وكل الباقيين واقفين ساكنين. */
+function autoAdjust(state: MatchState, exempt: { team: Team; index: number } | null): MatchState {
+  const positions: Record<Team, Point[]> = { home: [...state.positions.home], away: [...state.positions.away] };
+  (['home', 'away'] as Team[]).forEach((team) => {
+    positions[team] = positions[team].map((p, i) => {
+      if (exempt && exempt.team === team && exempt.index === i) return p;
+      if (team === state.ballOwner && i === state.ballIndex) return p; // حامل الكرة ما بيتحرك إلا بأمرك
+      const target = targetSlot(state, team, i);
+      const d = dist(p, target);
+      if (d < 0.5) return p;
+      const step = Math.min(AUTO_STEP, d);
+      const ang = Math.atan2(target.y - p.y, target.x - p.x);
+      const np = {
+        x: clamp(p.x + Math.cos(ang) * step, 0, PITCH_W),
+        y: clamp(p.y + Math.sin(ang) * step, 0, PITCH_H),
+      };
+      for (const t2 of ['home', 'away'] as Team[]) {
+        for (let j = 0; j < positions[t2].length; j++) {
+          if (t2 === team && j === i) continue;
+          if (dist(positions[t2][j], np) < MIN_SEP) return p; // رح يصطدم بلاعب ثاني، خليه مكانه هالمرة
+        }
+      }
+      return { x: round1(np.x), y: round1(np.y) };
+    });
+  });
+  return { ...state, positions };
+}
+
 /** مدى حركة الفريق (مع البطاقة). */
 export function moveRadius(state: MatchState, team: Team): number {
   return MOVE_RADIUS + boostOf(state, team).move;
@@ -316,7 +363,7 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
   let next: MatchState = { ...state, positions: { home: [...state.positions.home], away: [...state.positions.away] } };
 
   if (action.type === 'endTurn') {
-    return finishIfNeeded(endTurnIfNeeded(next, true));
+    return finishIfNeeded(endTurnIfNeeded(autoAdjust(next, null), true));
   }
 
   if (action.type === 'move') {
@@ -333,6 +380,7 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
       return finishIfNeeded(next);
     }
     next.ap -= 1;
+    next = autoAdjust(next, { team: actingTeam, index: action.playerIndex });
     return finishIfNeeded(endTurnIfNeeded(next, false));
   }
 
@@ -341,6 +389,7 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
     next.ballIndex = action.toPlayerIndex;
     next.lastEvent = 'تمريرة';
     next.ap -= 1;
+    next = autoAdjust(next, { team: actingTeam, index: action.toPlayerIndex });
     return finishIfNeeded(endTurnIfNeeded(next, false));
   }
 
@@ -369,6 +418,7 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
     });
     next.ballIndex = closestIdx;
     next.ap = 0;
+    next = autoAdjust(next, { team: opp(actingTeam), index: closestIdx });
     return finishIfNeeded(endTurnIfNeeded(next, true));
   }
 
@@ -383,6 +433,7 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
     } else {
       next.lastEvent = 'محاولة استخلاص فاشلة';
     }
+    next = autoAdjust(next, { team: actingTeam, index: action.playerIndex });
     return finishIfNeeded(endTurnIfNeeded(next, false));
   }
 
