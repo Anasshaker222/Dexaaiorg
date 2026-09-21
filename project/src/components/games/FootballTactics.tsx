@@ -11,16 +11,23 @@ import {
   tackleChance,
   moveRadius,
   aiChooseAction,
+  finishByTime,
   NO_BOOST,
   PITCH_W,
   PITCH_H,
   GOAL_HALF,
   GOAL_DEPTH,
   R_PLAYER,
+  MATCH_DURATION_MS,
+  TURN_TIME_MS,
+  FORMATION_IDS,
+  FORMATION_LABELS,
+  DEFAULT_FORMATION,
   type MatchState,
   type Team,
   type Point,
   type Action,
+  type FormationId,
 } from '../../lib/tacticsEngine';
 import { firebaseEnabled } from '../../lib/firebase';
 import {
@@ -32,10 +39,12 @@ import {
   leaveMatch,
   touchPresence,
   claimForfeitByTimeout,
+  claimFinishByTime,
+  claimStalledTurn,
   type MatchDoc,
 } from '../../lib/matchmaking';
 import { recordResult, getMyRank, type PlayerRank, type MatchReward } from '../../lib/ranking';
-import { ITEMS, boostFor, boostName } from '../../lib/progression';
+import { RING_ITEMS, boostFor, type PlayerCard } from '../../lib/progression';
 import TacticsProfile from './TacticsProfile';
 
 type Mode = 'menu' | 'local' | 'onlineSearch' | 'online';
@@ -52,9 +61,17 @@ function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
 
+function formatClock(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r.toString().padStart(2, '0')}`;
+}
+
 export default function FootballTactics() {
   const [mode, setMode] = useState<Mode>('menu');
   const [name, setName] = useState('');
+  const [formationChoice, setFormationChoice] = useState<FormationId>(DEFAULT_FORMATION);
   const [state, setState] = useState<MatchState>(() => initialState());
   const [selected, setSelected] = useState<number | null>(null);
   const [passMode, setPassMode] = useState(false);
@@ -70,11 +87,25 @@ export default function FootballTactics() {
   const [abandonedBy, setAbandonedBy] = useState<Team | null>(null);
   const rematchLoggedRef = useRef(false);
 
+  // توقيت المباراة (مدة كلية) والدور (لكل حركة) - محلي للعرض ولإنهاء الدور/المباراة تلقائيًا
+  // بوضع اللعب المحلي. بوضع الأونلاين القيم جايّة من فايرستور (startedAt/turnStartedAt).
+  const [boostCards, setBoostCards] = useState<Record<Team, PlayerCard | null> | null>(null);
+  const [matchStartedAt, setMatchStartedAt] = useState<number | null>(null);
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(Date.now());
+
   useEffect(() => {
     if (mode === 'menu' && firebaseEnabled) {
       getMyRank().then(setMyRank).catch(() => {});
     }
   }, [mode]);
+
+  // ساعة تيك كل ثانية طول ما في مباراة شغالة، عشان نحسب الوقت المتبقي للعرض والمنطق
+  useEffect(() => {
+    if ((mode !== 'local' && mode !== 'online') || state.status !== 'playing') return;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [mode, state.status]);
 
   // AI turn (local mode only)
   useEffect(() => {
@@ -83,9 +114,24 @@ export default function FootballTactics() {
       const action = aiChooseAction(state, 'away');
       setState((s) => applyAction(s, action, 'away'));
       setSelected(null);
+      setTurnStartedAt(Date.now());
     }, 650);
     return () => clearTimeout(t);
   }, [mode, state]);
+
+  // وضع محلي: إنهاء الدور تلقائيًا لو خلص وقت الدور، وإنهاء المباراة تلقائيًا لو خلص وقتها الكلي
+  useEffect(() => {
+    if (mode !== 'local' || state.status !== 'playing') return;
+    if (matchStartedAt !== null && nowTick - matchStartedAt >= MATCH_DURATION_MS) {
+      setState((s) => finishByTime(s));
+      return;
+    }
+    if (state.turn === 'home' && turnStartedAt !== null && nowTick - turnStartedAt >= TURN_TIME_MS) {
+      setState((s) => applyAction(s, { type: 'endTurn' }, 'home'));
+      setSelected(null);
+      setTurnStartedAt(Date.now());
+    }
+  }, [mode, state.status, state.turn, nowTick, matchStartedAt, turnStartedAt]);
 
   // online sync
   useEffect(() => {
@@ -95,6 +141,9 @@ export default function FootballTactics() {
       setState(m.state);
       setOppName(role === 'home' ? m.awayName : m.homeName);
       setAbandonedBy(m.abandonedBy ?? null);
+      setBoostCards(m.boostCards ?? null);
+      setMatchStartedAt(m.startedAt?.toMillis?.() ?? null);
+      setTurnStartedAt(m.turnStartedAt?.toMillis?.() ?? null);
     });
     return unsub;
   }, [mode, matchId, role]);
@@ -115,6 +164,25 @@ export default function FootballTactics() {
     }, 5000);
     return () => clearInterval(t);
   }, [mode, matchId, role, state.status]);
+
+  // مراقبة وقت المباراة الكلي أونلاين: لو خلص، أي طرف بيحسم النتيجة حسب الموجود بالنتيجة
+  useEffect(() => {
+    if (mode !== 'online' || !matchId || state.status !== 'playing') return;
+    const t = setInterval(() => {
+      claimFinishByTime(matchId).catch(() => {});
+    }, 5000);
+    return () => clearInterval(t);
+  }, [mode, matchId, state.status]);
+
+  // مراقبة وقت الدور أونلاين: لو صاحب الدور ما لعب خلال TURN_TIME_MS، أي طرف بيقدر يمرّر
+  // الدور جبرًا للطرف التاني (عدالة أكبر من انتظار انسحاب كامل).
+  useEffect(() => {
+    if (mode !== 'online' || !matchId || state.status !== 'playing') return;
+    const t = setInterval(() => {
+      claimStalledTurn(matchId, state.turn).catch(() => {});
+    }, 3000);
+    return () => clearInterval(t);
+  }, [mode, matchId, state.status, state.turn]);
 
   // انسحاب صريح: لو المستخدم سكّر التبويب أو غادر الصفحة ومباراته لسا شغالة
   useEffect(() => {
@@ -170,17 +238,27 @@ export default function FootballTactics() {
     setPassMode(false);
     setState(initialState());
     setAbandonedBy(null);
+    setBoostCards(null);
+    setMatchStartedAt(null);
+    setTurnStartedAt(null);
     rematchLoggedRef.current = false;
   }
 
-  // بطاقة التعزيز المجهّزة (بس إذا كانت مفتوحة عند اللاعب فعلاً)
-  function myBoostId(): string | null {
+  // بطاقة اللاعب المجهّزة (بس إذا كانت مفتوحة عند اللاعب فعلاً)
+  function myBoostCard(): PlayerCard | null {
     const id = myRank?.equippedBoost ?? null;
-    return id && myRank?.unlocked?.includes(id) ? id : null;
+    if (!id) return null;
+    return myRank?.unlockedBoosts?.find((c) => c.id === id) ?? null;
   }
 
   function startLocal() {
-    setState(initialState('home', { home: boostFor(myBoostId()), away: NO_BOOST }));
+    const boosts = { home: boostFor(myBoostCard()), away: NO_BOOST };
+    const formations = { home: formationChoice, away: DEFAULT_FORMATION };
+    setState(initialState('home', boosts, formations));
+    setBoostCards({ home: myBoostCard(), away: null });
+    const t = Date.now();
+    setMatchStartedAt(t);
+    setTurnStartedAt(t);
     setSelected(null);
     setPassMode(false);
     setHint('');
@@ -196,7 +274,7 @@ export default function FootballTactics() {
     }
     setMode('onlineSearch');
     try {
-      const { matchId: id, role: r } = await findOrCreateMatch(name.trim(), () => {}, myBoostId());
+      const { matchId: id, role: r } = await findOrCreateMatch(name.trim(), () => {}, myBoostCard(), formationChoice);
       setMatchId(id);
       setRole(r);
       setMode('online');
@@ -232,13 +310,17 @@ export default function FootballTactics() {
   const passActive = passMode && passTargets.length > 0;
   const selPos = selected !== null && isMyTurn ? state.positions[myTeam][selected] : null;
 
-  const equippedItem = ITEMS.find((i) => i.id === myRank?.equipped);
+  const equippedItem = RING_ITEMS.find((i) => i.id === myRank?.equipped);
+
+  const matchRemainingMs = matchStartedAt !== null ? Math.max(0, MATCH_DURATION_MS - (nowTick - matchStartedAt)) : MATCH_DURATION_MS;
+  const turnRemainingMs = turnStartedAt !== null ? Math.max(0, TURN_TIME_MS - (nowTick - turnStartedAt)) : TURN_TIME_MS;
 
   function act(action: Action) {
     const next = applyAction(state, action, myTeam);
     if (next === state) return;
     setState(next);
     if (mode === 'online' && matchId) pushMatchState(matchId, next);
+    else if (mode === 'local') setTurnStartedAt(Date.now());
     setPassMode(false);
     setHint('');
     // بعد الحركة بنخلي اللاعب محدّد عشان تقدر تحركه مرة ثانية، إلا إذا خلص الدور
@@ -312,7 +394,7 @@ export default function FootballTactics() {
           <div className="text-center">
             <Swords className="w-10 h-10 mx-auto text-emerald-400 mb-2" />
             <h3 className="font-display font-bold text-xl">تكتيكات الكورة</h3>
-            <p className="text-gray-400 text-sm mt-1">لعبة أدوار: حرّك لاعبينك بحرية، مرّر، سدّد من بعيد، واستخلص الكرة</p>
+            <p className="text-gray-400 text-sm mt-1">11 ضد 11: حرّك لاعبينك بحرية، مرّر، سدّد من بعيد، واستخلص الكرة</p>
           </div>
           <input
             value={name}
@@ -321,6 +403,20 @@ export default function FootballTactics() {
             className="glass rounded-xl px-4 py-2.5 text-sm outline-none border border-slate-700/50 focus:border-emerald-400/50"
             maxLength={16}
           />
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs text-gray-400 px-1">التشكيلة</label>
+            <select
+              value={formationChoice}
+              onChange={(e) => setFormationChoice(e.target.value as FormationId)}
+              className="glass rounded-xl px-4 py-2.5 text-sm outline-none border border-slate-700/50 focus:border-emerald-400/50 bg-transparent"
+            >
+              {FORMATION_IDS.map((f) => (
+                <option key={f} value={f} className="bg-slate-900">
+                  {FORMATION_LABELS[f]}
+                </option>
+              ))}
+            </select>
+          </div>
           {myRank && (
             <div className="text-xs text-gray-400 text-center">
               تصنيفك الحالي: <span className="text-emerald-400 font-bold">{myRank.elo}</span> — {myRank.wins} فوز / {myRank.losses} خسارة / {myRank.draws} تعادل
@@ -372,20 +468,28 @@ export default function FootballTactics() {
             </div>
           </div>
 
-          {(state.boosts?.home.id || state.boosts?.away.id) && (
+          {(boostCards?.home || boostCards?.away) && (
             <div className="flex items-center gap-3 text-[11px] text-gray-500">
-              <span>⚡ بطاقتك: {boostName(state.boosts?.[myTeam].id)}</span>
+              <span>⚡ بطاقتك: {boostCards?.[myTeam]?.name ?? 'بدون'}</span>
               <span>•</span>
-              <span>بطاقة الخصم: {boostName(state.boosts?.[oppTeam].id)}</span>
+              <span>بطاقة الخصم: {boostCards?.[oppTeam]?.name ?? 'بدون'}</span>
             </div>
           )}
 
-          <div className="flex items-center gap-3 text-xs text-gray-400">
-            <span>الدور {state.round + 1} / 30</span>
+          <div className="flex items-center gap-3 text-xs text-gray-400 flex-wrap justify-center">
+            <span>⏱ {formatClock(matchRemainingMs)}</span>
             <span>•</span>
             <span className={isMyTurn ? 'text-emerald-400 font-bold' : ''}>{isMyTurn ? 'دورك الآن' : 'دور الخصم'}</span>
             <span>•</span>
             <span>نقاط الحركة: {state.ap}</span>
+            {state.status === 'playing' && (
+              <>
+                <span>•</span>
+                <span className={turnRemainingMs <= 5000 ? 'text-red-400 font-bold' : ''}>
+                  ⏳ {Math.ceil(turnRemainingMs / 1000)}ث {isMyTurn ? 'لدورك' : 'للخصم'}
+                </span>
+              </>
+            )}
           </div>
 
           {/* الملعب */}
@@ -397,7 +501,7 @@ export default function FootballTactics() {
           >
             <rect x={VB.x} y={VB.y} width={VB.w} height={VB.h} fill="#052e1a" />
             {Array.from({ length: 10 }).map((_, i) => (
-              <rect key={i} x={i * 10} y={0} width={10} height={PITCH_H} fill={i % 2 ? '#14532d' : '#166534'} />
+              <rect key={i} x={i * (PITCH_W / 10)} y={0} width={PITCH_W / 10} height={PITCH_H} fill={i % 2 ? '#14532d' : '#166534'} />
             ))}
 
             {/* خطوط الملعب */}
@@ -460,7 +564,7 @@ export default function FootballTactics() {
                     <text
                       textAnchor="middle"
                       dominantBaseline="central"
-                      fontSize={3.4}
+                      fontSize={3}
                       fontWeight={700}
                       fill="#ffffff"
                       style={{ pointerEvents: 'none' }}
@@ -478,7 +582,7 @@ export default function FootballTactics() {
               const bx = bv.x + (state.ballOwner === myTeam ? 3.8 : -3.8);
               return (
                 <g style={{ transform: `translate(${bx}px, ${bv.y + 1.4}px)`, transition: 'transform 350ms ease' }}>
-                  <circle r={1.7} fill="#ffffff" stroke="#111827" strokeWidth={0.4} />
+                  <circle r={1.5} fill="#ffffff" stroke="#111827" strokeWidth={0.4} />
                 </g>
               );
             })()}
@@ -564,7 +668,15 @@ export default function FootballTactics() {
                 )}
                 {mode === 'online' && matchId && !abandonedBy && (
                   <button
-                    onClick={() => resetMatch(matchId, role === 'home' ? 'away' : 'home', state.boosts)}
+                    onClick={() =>
+                      resetMatch(
+                        matchId,
+                        role === 'home' ? 'away' : 'home',
+                        state.boosts,
+                        state.formations,
+                        boostCards ?? undefined
+                      )
+                    }
                     className="glass card-hover rounded-lg px-4 py-2 text-sm flex items-center gap-1 border border-slate-700/50"
                   >
                     <RotateCcw className="w-4 h-4" /> مباراة ثانية بنفس الخصم

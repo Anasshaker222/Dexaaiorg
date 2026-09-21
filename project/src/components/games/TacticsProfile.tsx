@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Gift, Sparkles, Check, Zap } from 'lucide-react';
-import { ITEMS, RARITY_META, levelProgress, describeEffect, type Item } from '../../lib/progression';
+import { RING_ITEMS, RARITY_META, levelProgress, describeCardEffect, type Item } from '../../lib/progression';
 import { openChest, equipItem, type PlayerRank, type ChestResult } from '../../lib/ranking';
 
 type Props = {
@@ -10,13 +10,11 @@ type Props = {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-const RINGS = ITEMS.filter((i) => i.kind === 'ring');
-const BOOSTS = ITEMS.filter((i) => i.kind === 'boost');
-
 export default function TacticsProfile({ rank, onRefresh }: Props) {
   const xp = rank?.xp ?? 0;
   const chests = rank?.chests ?? 0;
   const unlocked = rank?.unlocked ?? [];
+  const unlockedBoosts = rank?.unlockedBoosts ?? [];
   const equippedRing = rank?.equipped ?? null;
   const equippedBoost = rank?.equippedBoost ?? null;
   const prog = levelProgress(xp);
@@ -46,17 +44,27 @@ export default function TacticsProfile({ rank, onRefresh }: Props) {
     }
   }
 
-  async function handleEquip(item: Item | null, kind: 'ring' | 'boost') {
+  async function handleEquipRing(item: Item | null) {
     setErr('');
     try {
-      await equipItem(item?.id ?? null, kind);
+      await equipItem(item?.id ?? null, 'ring');
       onRefresh();
     } catch {
       setErr('تعذّر حفظ الاختيار، جرّب كمان مرة.');
     }
   }
 
-  const resultMeta = result ? RARITY_META[result.item.rarity] : null;
+  async function handleEquipBoost(cardId: string | null) {
+    setErr('');
+    try {
+      await equipItem(cardId, 'boost');
+      onRefresh();
+    } catch {
+      setErr('تعذّر حفظ الاختيار، جرّب كمان مرة.');
+    }
+  }
+
+  const resultMeta = result ? RARITY_META[result.kind === 'ring' ? result.item.rarity : result.card.rarity] : null;
 
   return (
     <div className="glass rounded-xl border border-slate-700/50 p-4 flex flex-col gap-3">
@@ -103,27 +111,30 @@ export default function TacticsProfile({ rank, onRefresh }: Props) {
       {phase === 'result' && result && resultMeta && (
         <div className={`animate-scale-in rounded-xl border ${resultMeta.border} p-4 flex flex-col items-center gap-2`}>
           <Sparkles className={`w-5 h-5 ${resultMeta.text}`} />
-          {result.item.kind === 'ring' ? (
+          {result.kind === 'ring' ? (
             <div className="w-12 h-12 rounded-full bg-cyan-500" style={{ boxShadow: `inset 0 0 0 4px ${result.item.color}` }} />
           ) : (
             <div
               className="w-12 h-12 rounded-xl flex items-center justify-center"
-              style={{ backgroundColor: `${result.item.color}22`, boxShadow: `inset 0 0 0 2px ${result.item.color}` }}
+              style={{ backgroundColor: `${result.card.color}22`, boxShadow: `inset 0 0 0 2px ${result.card.color}` }}
             >
-              <Zap className="w-6 h-6" style={{ color: result.item.color }} />
+              <Zap className="w-6 h-6" style={{ color: result.card.color }} />
             </div>
           )}
-          <div className="font-display font-bold text-sm">{result.item.name}</div>
+          <div className="font-display font-bold text-sm">{result.kind === 'ring' ? result.item.name : result.card.name}</div>
           <div className={`text-xs font-semibold ${resultMeta.text}`}>
-            {resultMeta.label} • {result.item.kind === 'ring' ? 'إطار' : 'بطاقة تعزيز'}
+            {resultMeta.label} • {result.kind === 'ring' ? 'إطار' : 'بطاقة لاعب'}
           </div>
-          {result.item.effect && <div className="text-xs text-gray-300 text-center">{describeEffect(result.item.effect)}</div>}
+          {result.kind === 'boost' && (
+            <div className="text-xs text-gray-300 text-center">{describeCardEffect(result.card)}</div>
+          )}
           {result.duplicate ? (
             <div className="text-xs text-gray-400">مكرّر — حصلت على +{result.xpBonus} XP بدالها</div>
           ) : (
             <button
               onClick={() => {
-                handleEquip(result.item, result.item.kind);
+                if (result.kind === 'ring') handleEquipRing(result.item);
+                else handleEquipBoost(result.card.id);
                 setPhase('idle');
               }}
               className="glass rounded-lg px-3 py-1.5 text-xs font-semibold border border-emerald-400/40 text-emerald-300"
@@ -140,43 +151,47 @@ export default function TacticsProfile({ rank, onRefresh }: Props) {
       {/* Collections */}
       <div className="flex items-center gap-4 text-xs">
         <button onClick={() => setPanel(panel === 'boosts' ? null : 'boosts')} className={`underline ${panel === 'boosts' ? 'text-emerald-300' : 'text-gray-400'}`}>
-          بطاقاتي ({BOOSTS.filter((b) => unlocked.includes(b.id)).length}/{BOOSTS.length})
+          بطاقات لاعبيني ({unlockedBoosts.length})
         </button>
         <button onClick={() => setPanel(panel === 'rings' ? null : 'rings')} className={`underline ${panel === 'rings' ? 'text-emerald-300' : 'text-gray-400'}`}>
-          إطاراتي ({RINGS.filter((r) => unlocked.includes(r.id)).length}/{RINGS.length})
+          إطاراتي ({RING_ITEMS.filter((r) => unlocked.includes(r.id)).length}/{RING_ITEMS.length})
         </button>
       </div>
 
       {panel === 'boosts' && (
         <div className="flex flex-col gap-2">
-          <p className="text-[11px] text-gray-500">بطاقة وحدة بتلعب فيها بالمباراة (التدريبية والأونلاين). الخصم بيشوفها.</p>
+          <p className="text-[11px] text-gray-500">
+            بطاقة وحدة بتلعب فيها بالمباراة (التدريبية والأونلاين). كل بطاقة اسمها وقدرتها عشوائية — ممكن يتكرر نوع
+            القدرة بس بقيمة مختلفة. الخصم بيشوفها.
+          </p>
           <button
-            onClick={() => handleEquip(null, 'boost')}
+            onClick={() => handleEquipBoost(null)}
             className={`rounded-lg border px-3 py-2 text-xs text-right ${equippedBoost === null ? 'border-emerald-400/60' : 'border-slate-700/50'}`}
           >
             بدون بطاقة
           </button>
-          {BOOSTS.map((item) => {
-            const owned = unlocked.includes(item.id);
-            const meta = RARITY_META[item.rarity];
+          {unlockedBoosts.length === 0 && (
+            <p className="text-[11px] text-gray-600 text-center py-2">لسا ما فتحت ولا بطاقة لاعب. افتح صندوق!</p>
+          )}
+          {unlockedBoosts.map((card) => {
+            const meta = RARITY_META[card.rarity];
             return (
               <button
-                key={item.id}
-                disabled={!owned}
-                onClick={() => handleEquip(item, 'boost')}
+                key={card.id}
+                onClick={() => handleEquipBoost(card.id)}
                 className={`relative rounded-lg border px-3 py-2 text-right flex items-center gap-3 ${
-                  equippedBoost === item.id ? 'border-emerald-400/60' : meta.border
-                } ${owned ? '' : 'opacity-30'}`}
+                  equippedBoost === card.id ? 'border-emerald-400/60' : meta.border
+                }`}
               >
-                <Zap className="w-4 h-4 shrink-0" style={{ color: owned ? item.color : undefined }} />
+                <Zap className="w-4 h-4 shrink-0" style={{ color: card.color }} />
                 <div className="flex-1 min-w-0">
                   <div className="text-xs font-semibold flex items-center gap-2">
-                    {owned ? item.name : '؟؟؟'}
+                    {card.name}
                     <span className={`text-[10px] ${meta.text}`}>{meta.label}</span>
                   </div>
-                  {owned && item.effect && <div className="text-[11px] text-gray-400">{describeEffect(item.effect)}</div>}
+                  <div className="text-[11px] text-gray-400">{describeCardEffect(card)}</div>
                 </div>
-                {equippedBoost === item.id && <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                {equippedBoost === card.id && <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
               </button>
             );
           })}
@@ -186,7 +201,7 @@ export default function TacticsProfile({ rank, onRefresh }: Props) {
       {panel === 'rings' && (
         <div className="grid grid-cols-4 gap-2">
           <button
-            onClick={() => handleEquip(null, 'ring')}
+            onClick={() => handleEquipRing(null)}
             className={`rounded-lg border p-2 flex flex-col items-center gap-1 text-[10px] ${
               equippedRing === null ? 'border-emerald-400/60' : 'border-slate-700/50'
             }`}
@@ -194,13 +209,13 @@ export default function TacticsProfile({ rank, onRefresh }: Props) {
             <div className="w-7 h-7 rounded-full bg-cyan-500" />
             بدون
           </button>
-          {RINGS.map((item) => {
+          {RING_ITEMS.map((item) => {
             const owned = unlocked.includes(item.id);
             return (
               <button
                 key={item.id}
                 disabled={!owned}
-                onClick={() => handleEquip(item, 'ring')}
+                onClick={() => handleEquipRing(item)}
                 className={`relative rounded-lg border p-2 flex flex-col items-center gap-1 text-[10px] ${
                   equippedRing === item.id ? 'border-emerald-400/60' : RARITY_META[item.rarity].border
                 } ${owned ? '' : 'opacity-30'}`}

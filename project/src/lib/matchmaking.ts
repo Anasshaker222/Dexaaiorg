@@ -13,10 +13,22 @@ import {
   limit,
 } from 'firebase/firestore';
 import { db, ensureSignedIn } from './firebase';
-import { initialState, type MatchState, type Team, type Boost } from './tacticsEngine';
-import { boostFor } from './progression';
+import {
+  initialState,
+  applyAction,
+  finishByTime,
+  DEFAULT_FORMATION,
+  MATCH_DURATION_MS,
+  TURN_TIME_MS,
+  type MatchState,
+  type Team,
+  type Boost,
+  type FormationId,
+} from './tacticsEngine';
+import { boostFor, type PlayerCard } from './progression';
 
 export type Presence = Partial<Record<Team, { toMillis: () => number } | null>>;
+export type FsTimestamp = { toMillis: () => number };
 
 export type MatchDoc = {
   home: string;
@@ -27,14 +39,21 @@ export type MatchDoc = {
   rematch: { home: boolean; away: boolean };
   presence?: Presence;
   abandonedBy?: Team | null;
+  startedAt?: FsTimestamp;
+  turnStartedAt?: FsTimestamp;
+  // بطاقات اللاعبين المجهّزة (لعرض الاسم/التفاصيل بس - المحرك نفسه بس بياخد الأرقام
+  // عبر state.boosts، عشان يضل نقي وما يعرف شي عن نظام البطاقات).
+  boostCards?: Record<Team, PlayerCard | null>;
 };
 
 // كل قد إيش (ms) بيبعث كل لاعب "نبضة" يخبر فيها إنه لسا موجود
 const PRESENCE_INTERVAL_MS = 6000;
-// إذا ما وصلت نبضة الخصم خلال هاد الوقت، بنعتبره منسحب/مقطوع
+// إذا ما وصلت نبضة الخصم خلال هاد الوقت، بنعتبره منسحب/مقطوع تمامًا (تخلص المباراة)
 const PRESENCE_TIMEOUT_MS = 18000;
 // نفس الفكرة بس للاعب الواقف بالدور (طابور الانتظار)
 const QUEUE_STALE_MS = 20000;
+// هامش بسيط فوق TURN_TIME_MS عشان فرق التوقيت البسيط بين المتصفحين
+const TURN_GRACE_MS = 2000;
 
 function opponentOf(role: Team): Team {
   return role === 'home' ? 'away' : 'home';
@@ -56,7 +75,8 @@ function stopActiveSearch() {
 export async function findOrCreateMatch(
   displayName: string,
   onWaiting: () => void,
-  myBoostId: string | null = null
+  myBoostCard: PlayerCard | null = null,
+  myFormation: FormationId = DEFAULT_FORMATION
 ): Promise<{ matchId: string; role: Team }> {
   if (!db) throw new Error('اللعب أونلاين غير مفعّل حاليًا');
   const firestore = db;
@@ -71,7 +91,7 @@ export async function findOrCreateMatch(
   const now = Date.now();
   const candidate = snap.docs.find((d) => {
     if (d.id === uid) return false;
-    const data = d.data() as { lastSeen?: { toMillis: () => number }; createdAt?: { toMillis: () => number } };
+    const data = d.data() as { lastSeen?: FsTimestamp; createdAt?: FsTimestamp };
     const seenAt = data.lastSeen?.toMillis?.() ?? data.createdAt?.toMillis?.() ?? 0;
     return now - seenAt < QUEUE_STALE_MS;
   });
@@ -82,18 +102,31 @@ export async function findOrCreateMatch(
       const freshCandidate = await tx.get(doc(firestore, 'tacticsQueue', candidate.id));
       if (!freshCandidate.exists() || freshCandidate.data().status !== 'waiting') return false;
       const matchRef = doc(firestore, 'tacticsMatches', matchId);
+      const cd = freshCandidate.data();
+      const formations: Record<Team, FormationId> = {
+        home: (cd.formation as FormationId) || DEFAULT_FORMATION,
+        away: myFormation,
+      };
       const initial: MatchDoc = {
         home: candidate.id,
         away: uid,
-        homeName: freshCandidate.data().name || 'لاعب',
+        homeName: cd.name || 'لاعب',
         awayName: displayName || 'لاعب',
-        state: initialState('home', {
-          home: boostFor(freshCandidate.data().boost),
-          away: boostFor(myBoostId),
-        }),
+        state: initialState(
+          'home',
+          { home: boostFor(cd.boost as PlayerCard | null), away: boostFor(myBoostCard) },
+          formations
+        ),
         rematch: { home: false, away: false },
+        boostCards: { home: (cd.boost as PlayerCard | null) ?? null, away: myBoostCard ?? null },
       };
-      tx.set(matchRef, { ...initial, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      tx.set(matchRef, {
+        ...initial,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        startedAt: serverTimestamp(),
+        turnStartedAt: serverTimestamp(),
+      });
       tx.update(doc(firestore, 'tacticsQueue', candidate.id), { status: 'matched', matchId });
       return true;
     });
@@ -106,7 +139,8 @@ export async function findOrCreateMatch(
   await setDoc(doc(firestore, 'tacticsQueue', uid), {
     name: displayName || 'لاعب',
     status: 'waiting',
-    boost: myBoostId,
+    boost: myBoostCard,
+    formation: myFormation,
     matchId: null,
     createdAt: serverTimestamp(),
     lastSeen: serverTimestamp(),
@@ -154,7 +188,13 @@ export function subscribeMatch(matchId: string, cb: (m: MatchDoc | null) => void
 export async function pushMatchState(matchId: string, state: MatchState) {
   if (!db) return;
   const firestore = db;
-  await updateDoc(doc(firestore, 'tacticsMatches', matchId), { state, updatedAt: serverTimestamp() });
+  // كل حركة (حتى لو ما خلصت الدور) بتصفّر ساعة الدور، عشان يضل عند اللاعب وقت كافي
+  // من آخر حركة أي حدا سواها.
+  await updateDoc(doc(firestore, 'tacticsMatches', matchId), {
+    state,
+    updatedAt: serverTimestamp(),
+    turnStartedAt: serverTimestamp(),
+  });
 }
 
 export async function requestRematch(matchId: string, role: Team) {
@@ -163,14 +203,23 @@ export async function requestRematch(matchId: string, role: Team) {
   await updateDoc(doc(firestore, 'tacticsMatches', matchId), { [`rematch.${role}`]: true });
 }
 
-export async function resetMatch(matchId: string, kickoff: Team, boosts?: Record<Team, Boost>) {
+export async function resetMatch(
+  matchId: string,
+  kickoff: Team,
+  boosts?: Record<Team, Boost>,
+  formations?: Record<Team, FormationId>,
+  boostCards?: Record<Team, PlayerCard | null>
+) {
   if (!db) return;
   const firestore = db;
   await updateDoc(doc(firestore, 'tacticsMatches', matchId), {
-    state: initialState(kickoff, boosts),
+    state: initialState(kickoff, boosts, formations),
     rematch: { home: false, away: false },
     abandonedBy: null,
     updatedAt: serverTimestamp(),
+    startedAt: serverTimestamp(),
+    turnStartedAt: serverTimestamp(),
+    ...(boostCards ? { boostCards } : {}),
   });
 }
 
@@ -220,6 +269,44 @@ export async function claimForfeitByTimeout(matchId: string, myRole: Team): Prom
       abandonedBy: oppRole,
       updatedAt: serverTimestamp(),
     });
+    return true;
+  }).catch(() => false);
+}
+
+/** لما وقت المباراة الكلي (MATCH_DURATION_MS) يخلص، أي طرف بيقدر يحسم النتيجة حسب
+ * النتيجة الحالية بترانزاكشن آمنة حتى ما تصير مرتين. */
+export async function claimFinishByTime(matchId: string): Promise<boolean> {
+  if (!db) return false;
+  const firestore = db;
+  return runTransaction(firestore, async (tx) => {
+    const ref = doc(firestore, 'tacticsMatches', matchId);
+    const snap = await tx.get(ref);
+    if (!snap.exists()) return false;
+    const data = snap.data() as MatchDoc;
+    if (data.state.status === 'finished') return false;
+    const startedAt = data.startedAt?.toMillis?.() ?? 0;
+    if (Date.now() - startedAt < MATCH_DURATION_MS) return false; // لسا في وقت
+    tx.update(ref, { state: finishByTime(data.state), updatedAt: serverTimestamp() });
+    return true;
+  }).catch(() => false);
+}
+
+/** لما دور اللاعب صاحب الكرة يعدّي بدون ما يلعب (TURN_TIME_MS)، أي طرف بيقدر يمرّر
+ * الدور جبرًا للطرف التاني - بترانزاكشن آمنة حتى ما تصير مرتين. */
+export async function claimStalledTurn(matchId: string, stalledTeam: Team): Promise<boolean> {
+  if (!db) return false;
+  const firestore = db;
+  return runTransaction(firestore, async (tx) => {
+    const ref = doc(firestore, 'tacticsMatches', matchId);
+    const snap = await tx.get(ref);
+    if (!snap.exists()) return false;
+    const data = snap.data() as MatchDoc;
+    if (data.state.status !== 'playing' || data.state.turn !== stalledTeam) return false;
+    const turnStartedAt = data.turnStartedAt?.toMillis?.() ?? 0;
+    if (Date.now() - turnStartedAt < TURN_TIME_MS + TURN_GRACE_MS) return false; // لسا بوقته
+    const next = applyAction(data.state, { type: 'endTurn' }, stalledTeam);
+    if (next === data.state) return false;
+    tx.update(ref, { state: next, updatedAt: serverTimestamp(), turnStartedAt: serverTimestamp() });
     return true;
   }).catch(() => false);
 }

@@ -1,6 +1,16 @@
 import { doc, getDoc, setDoc, updateDoc, runTransaction, collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
 import { db, ensureSignedIn } from './firebase';
-import { DUPLICATE_XP, ITEMS, levelFromXp, matchXp, rollItem, type Item, type ItemKind } from './progression';
+import {
+  DUPLICATE_XP,
+  RING_ITEMS,
+  levelFromXp,
+  matchXp,
+  rollItem,
+  rollPlayerCard,
+  type Item,
+  type ItemKind,
+  type PlayerCard,
+} from './progression';
 
 export type MatchOutcome = 1 | 0.5 | 0;
 
@@ -12,13 +22,16 @@ export type PlayerRank = {
   draws: number;
   xp?: number;
   chests?: number;
-  unlocked?: string[];
+  unlocked?: string[]; // معرّفات الإطارات المفتوحة (كتالوج ثابت)
+  unlockedBoosts?: PlayerCard[]; // بطاقات اللاعبين المفتوحة (عشوائية، كل وحدة كاملة بحالها)
   equipped?: string | null; // الإطار الملوّن
-  equippedBoost?: string | null; // بطاقة التعزيز
+  equippedBoost?: string | null; // معرّف بطاقة اللاعب المجهّزة (من unlockedBoosts)
 };
 
 export type MatchReward = { xpGain: number; levelBefore: number; levelAfter: number; chestsGained: number };
-export type ChestResult = { item: Item; duplicate: boolean; xpBonus: number };
+export type ChestResult =
+  | { kind: 'ring'; item: Item; duplicate: boolean; xpBonus: number }
+  | { kind: 'boost'; card: PlayerCard; duplicate: boolean; xpBonus: number };
 
 const START_ELO = 1000;
 const K = 32;
@@ -67,6 +80,7 @@ export async function recordResult(
     xp: xpAfter,
     chests: (current.chests ?? 0) + chestsGained,
     unlocked: current.unlocked ?? [],
+    unlockedBoosts: current.unlockedBoosts ?? [],
     equipped: current.equipped ?? null,
     equippedBoost: current.equippedBoost ?? null,
   });
@@ -74,7 +88,9 @@ export async function recordResult(
   return { xpGain, levelBefore, levelAfter, chestsGained };
 }
 
-/** بيفتح صندوق واحد (بترانزاكشن عشان ما ينفتح مرتين بنفس اللحظة). */
+/** بيفتح صندوق واحد: نص الوقت بيطلع إطار من الكتالوج الثابت، والنص التاني بيطلع بطاقة
+ * لاعب جديدة بالكامل (اسم عشوائي + قدرة وقيمة عشوائية). بترانزاكشن عشان ما ينفتح مرتين
+ * بنفس اللحظة. */
 export async function openChest(): Promise<ChestResult | null> {
   if (!db) return null;
   const firestore = db;
@@ -87,16 +103,32 @@ export async function openChest(): Promise<ChestResult | null> {
     const cur = snap.data() as PlayerRank;
     const chests = cur.chests ?? 0;
     if (chests <= 0) return null;
-    const item = rollItem();
-    const unlocked = cur.unlocked ?? [];
-    const duplicate = unlocked.includes(item.id);
+
+    if (Math.random() < 0.5) {
+      const item = rollItem(RING_ITEMS);
+      const unlocked = cur.unlocked ?? [];
+      const duplicate = unlocked.includes(item.id);
+      const xpBonus = duplicate ? DUPLICATE_XP : 0;
+      tx.update(ref, {
+        chests: chests - 1,
+        unlocked: duplicate ? unlocked : [...unlocked, item.id],
+        xp: (cur.xp ?? 0) + xpBonus,
+      });
+      return { kind: 'ring', item, duplicate, xpBonus };
+    }
+
+    const card = rollPlayerCard();
+    const unlockedBoosts = cur.unlockedBoosts ?? [];
+    // مكرّر هون معناها نفس اسم اللاعب موجود عندك أصلاً (القيم والقدرة ممكن تختلف
+    // لأنها عشوائية كل مرة، فمش منطقي نقارن بالمعرّف الفريد).
+    const duplicate = unlockedBoosts.some((c) => c.name === card.name);
     const xpBonus = duplicate ? DUPLICATE_XP : 0;
     tx.update(ref, {
       chests: chests - 1,
-      unlocked: duplicate ? unlocked : [...unlocked, item.id],
+      unlockedBoosts: duplicate ? unlockedBoosts : [...unlockedBoosts, card],
       xp: (cur.xp ?? 0) + xpBonus,
     });
-    return { item, duplicate, xpBonus };
+    return { kind: 'boost', card, duplicate, xpBonus };
   });
 }
 
@@ -104,8 +136,18 @@ export async function equipItem(itemId: string | null, kind: ItemKind) {
   if (!db) return;
   const uid = await ensureSignedIn();
   if (!uid) return;
-  if (itemId !== null && !ITEMS.some((i) => i.id === itemId && i.kind === kind)) return;
-  await updateDoc(doc(db, 'tacticsPlayers', uid), { [kind === 'boost' ? 'equippedBoost' : 'equipped']: itemId });
+  if (kind === 'ring') {
+    if (itemId !== null && !RING_ITEMS.some((i) => i.id === itemId)) return;
+    await updateDoc(doc(db, 'tacticsPlayers', uid), { equipped: itemId });
+    return;
+  }
+  // kind === 'boost': لازم البطاقة تكون فعلاً من بطاقات اللاعب المفتوحة
+  if (itemId !== null) {
+    const snap = await getDoc(doc(db, 'tacticsPlayers', uid));
+    const owned = (snap.data() as PlayerRank | undefined)?.unlockedBoosts ?? [];
+    if (!owned.some((c) => c.id === itemId)) return;
+  }
+  await updateDoc(doc(db, 'tacticsPlayers', uid), { equippedBoost: itemId });
 }
 
 export async function getMyRank(): Promise<PlayerRank | null> {

@@ -5,22 +5,37 @@
 // الملعب هلأ بإحداثيات حرّة (x, y) بدل المربعات. الفريق home بيهاجم باتجاه x = PITCH_W
 // (المرمى اليمين)، والفريق away بيهاجم باتجاه x = 0 (المرمى اليسار).
 
-export const PITCH_W = 100;
-export const PITCH_H = 64;
-export const GOAL_HALF = 9; // نص عرض المرمى
+export const PITCH_W = 150;
+export const PITCH_H = 96;
+export const GOAL_HALF = 12; // نص عرض المرمى
 export const GOAL_DEPTH = 4; // لو الكرة دخلت هالمسافة من خط المرمى (وبين القائمين) بيتحسب هدف
-export const R_PLAYER = 3.2; // نصف قطر اللاعب (للرسم فقط)
-export const MOVE_RADIUS = 16; // أقصى مسافة بيتحركها لاعب بحركة وحدة
-export const MIN_SEP = 7; // أقل مسافة مسموحة بين لاعبين
+export const R_PLAYER = 2.6; // نصف قطر اللاعب (للرسم فقط)
+export const MOVE_RADIUS = 18; // أقصى مسافة بيتحركها لاعب بحركة وحدة
+export const MIN_SEP = 6; // أقل مسافة مسموحة بين لاعبين
 export const TACKLE_RANGE = 10; // أقصى مسافة للاستخلاص
-export const PASS_RANGE = 42; // أقصى مسافة للتمرير
-export const MAX_SHOOT_DIST = 70; // أقصى مسافة للتسديد عن مركز المرمى
+export const PASS_RANGE = 60; // أقصى مسافة للتمرير
+export const MAX_SHOOT_DIST = 100; // أقصى مسافة للتسديد عن مركز المرمى
 export const AP_PER_TURN = 2;
-export const MAX_ROUNDS = 30; // 15 دور لكل فريق كحد أقصى
-export const MAX_GOALS = 3; // أول فريق يوصل 3 أهداف بيكسب فورًا
+export const MAX_GOALS = 2; // أول فريق يوصل هدفين بيكسب فورًا
+export const TEAM_SIZE = 11; // 11 ضد 11
+
+// وقت المباراة الكلي ووقت كل دور - بيتحكم فيهم المكوّن (مش المحرك نفسه، لأنه المحرك نقي
+// وما بيعرف الوقت الحقيقي)، بس القيم مركزية هون حتى تنقرا بمكان وحد.
+export const MATCH_DURATION_MS = 8 * 60 * 1000; // مدة المباراة: 8 دقائق. لو خلص الوقت، الفوز للي قدام بالنتيجة
+export const TURN_TIME_MS = 20 * 1000; // كل ما توصلك الكرة أو يصير دورك، عندك 20 ثانية تلعب فيها، وإلا بتروح الكرة للطرف التاني
 
 export type Team = 'home' | 'away';
 export type Point = { x: number; y: number };
+export type FormationId = '4-4-2' | '4-3-3' | '3-5-2' | '4-2-3-1';
+
+export const FORMATION_IDS: FormationId[] = ['4-4-2', '4-3-3', '3-5-2', '4-2-3-1'];
+export const FORMATION_LABELS: Record<FormationId, string> = {
+  '4-4-2': '4-4-2 — متوازنة',
+  '4-3-3': '4-3-3 — هجومية',
+  '3-5-2': '3-5-2 — تحكم بالوسط',
+  '4-2-3-1': '4-2-3-1 — دفاع منظم',
+};
+export const DEFAULT_FORMATION: FormationId = '4-4-2';
 
 /** بطاقة تعزيز بتأثر على اللعب لفريق واحد (بتيجي من الصناديق). القيم كلها إضافات صغيرة. */
 export type Boost = {
@@ -35,17 +50,18 @@ export type Boost = {
 export const NO_BOOST: Boost = { id: null, move: 0, pass: 0, shoot: 0, tackle: 0, guard: 0 };
 
 export type MatchState = {
-  positions: Record<Team, Point[]>; // 5 لاعبين بكل فريق
+  positions: Record<Team, Point[]>; // 11 لاعب بكل فريق
   ballOwner: Team;
   ballIndex: number; // مين حامل الكرة (index بمصفوفة positions)
   turn: Team;
   ap: number; // نقاط الحركة المتبقية بهاد الدور
   score: Record<Team, number>;
-  round: number; // إجمالي عدد الأدوار اللي مرت
+  round: number; // إجمالي عدد الأدوار اللي مرت (للعرض بس، مش شرط انتهاء)
   status: 'playing' | 'finished';
   winner: Team | 'draw' | null;
   lastEvent: string;
   boosts?: Record<Team, Boost>; // اختياري: المباريات القديمة ما فيها بطاقات
+  formations?: Record<Team, FormationId>; // اختياري: المباريات القديمة كانت بتشكيلة وحيدة ثابتة
 };
 
 export type Action =
@@ -94,16 +110,63 @@ function inGoalMouth(team: Team, p: Point): boolean {
 
 // ---------- الحالة الابتدائية ----------
 
-function formation(team: Team): Point[] {
-  const base: Point[] = [
-    { x: 14, y: 32 },
-    { x: 23, y: 14 },
-    { x: 23, y: 50 },
-    { x: 32, y: 32 },
-    { x: 43, y: 32 },
-  ];
+// ---------- الحالة الابتدائية ----------
+
+// كل تشكيلة عبارة عن 11 نقطة: حارس مرمى + المدافعين + الوسط + المهاجمين، بإحداثيات نص
+// ملعب "home" (بيهاجم يمين). الفريق away بياخد نفس التشكيلة بالمرآة.
+const FORMATIONS: Record<FormationId, Point[]> = {
+  '4-4-2': [
+    { x: 8, y: 48 },
+    { x: 24, y: 14 }, { x: 24, y: 36 }, { x: 24, y: 60 }, { x: 24, y: 82 },
+    { x: 55, y: 14 }, { x: 55, y: 36 }, { x: 55, y: 60 }, { x: 55, y: 82 },
+    { x: 72, y: 34 }, { x: 72, y: 62 },
+  ],
+  '4-3-3': [
+    { x: 8, y: 48 },
+    { x: 24, y: 14 }, { x: 24, y: 36 }, { x: 24, y: 60 }, { x: 24, y: 82 },
+    { x: 52, y: 24 }, { x: 52, y: 48 }, { x: 52, y: 72 },
+    { x: 74, y: 16 }, { x: 74, y: 48 }, { x: 74, y: 80 },
+  ],
+  '3-5-2': [
+    { x: 8, y: 48 },
+    { x: 22, y: 24 }, { x: 22, y: 48 }, { x: 22, y: 72 },
+    { x: 50, y: 10 }, { x: 50, y: 29 }, { x: 50, y: 48 }, { x: 50, y: 67 }, { x: 50, y: 86 },
+    { x: 72, y: 34 }, { x: 72, y: 62 },
+  ],
+  '4-2-3-1': [
+    { x: 8, y: 48 },
+    { x: 24, y: 14 }, { x: 24, y: 36 }, { x: 24, y: 60 }, { x: 24, y: 82 },
+    { x: 42, y: 32 }, { x: 42, y: 64 },
+    { x: 58, y: 18 }, { x: 58, y: 48 }, { x: 58, y: 78 },
+    { x: 72, y: 48 },
+  ],
+};
+
+function formation(team: Team, formationId: FormationId = DEFAULT_FORMATION): Point[] {
+  const base = FORMATIONS[formationId] ?? FORMATIONS[DEFAULT_FORMATION];
   if (team === 'home') return base;
   return base.map((p) => ({ x: PITCH_W - p.x, y: p.y }));
+}
+
+/** index المهاجم الأكثر تقدّمًا ومركزية بالتشكيلة - هو اللي بيبدأ ماسك الكرة عند الإرسالة. */
+function kickoffIndexFor(formationId: FormationId): number {
+  const base = FORMATIONS[formationId] ?? FORMATIONS[DEFAULT_FORMATION];
+  let bestIdx = 1;
+  let bestX = -Infinity;
+  base.forEach((p, i) => {
+    if (i === 0) return; // تجاهل الحارس
+    if (p.x > bestX) bestX = p.x;
+  });
+  let bestYDist = Infinity;
+  base.forEach((p, i) => {
+    if (i === 0 || p.x !== bestX) return;
+    const yDist = Math.abs(p.y - PITCH_H / 2);
+    if (yDist < bestYDist) {
+      bestYDist = yDist;
+      bestIdx = i;
+    }
+  });
+  return bestIdx;
 }
 
 function boostOf(state: MatchState, team: Team): Boost {
@@ -125,11 +188,16 @@ export function tackleChance(state: MatchState, team: Team): number {
   return clamp(0.5 + boostOf(state, team).tackle - boostOf(state, opp(team)).guard, 0.2, 0.8);
 }
 
-export function initialState(kickoff: Team = 'home', boosts?: Record<Team, Boost>): MatchState {
+export function initialState(
+  kickoff: Team = 'home',
+  boosts?: Record<Team, Boost>,
+  formations?: Record<Team, FormationId>
+): MatchState {
+  const f = formations ?? { home: DEFAULT_FORMATION, away: DEFAULT_FORMATION };
   return {
-    positions: { home: formation('home'), away: formation('away') },
+    positions: { home: formation('home', f.home), away: formation('away', f.away) },
     ballOwner: kickoff,
-    ballIndex: 4,
+    ballIndex: kickoffIndexFor(f[kickoff]),
     turn: kickoff,
     ap: AP_PER_TURN,
     score: { home: 0, away: 0 },
@@ -138,28 +206,39 @@ export function initialState(kickoff: Team = 'home', boosts?: Record<Team, Boost
     winner: null,
     lastEvent: 'انطلاق المباراة',
     boosts: boosts ?? { home: NO_BOOST, away: NO_BOOST },
+    formations: f,
   };
 }
 
 function resetAfterGoal(state: MatchState, scoringTeam: Team): MatchState {
   const conceding = opp(scoringTeam);
+  const f = state.formations ?? { home: DEFAULT_FORMATION, away: DEFAULT_FORMATION };
   return {
     ...state,
-    positions: { home: formation('home'), away: formation('away') },
+    positions: { home: formation('home', f.home), away: formation('away', f.away) },
     ballOwner: conceding,
-    ballIndex: 4,
+    ballIndex: kickoffIndexFor(f[conceding]),
     turn: conceding,
     ap: AP_PER_TURN,
   };
 }
 
 function finishIfNeeded(state: MatchState): MatchState {
-  if (state.score.home >= MAX_GOALS || state.score.away >= MAX_GOALS || state.round >= MAX_ROUNDS) {
+  if (state.score.home >= MAX_GOALS || state.score.away >= MAX_GOALS) {
     const winner: Team | 'draw' =
       state.score.home === state.score.away ? 'draw' : state.score.home > state.score.away ? 'home' : 'away';
     return { ...state, status: 'finished', winner };
   }
   return state;
+}
+
+/** بتخلص المباراة فورًا حسب النتيجة الحالية - تُستخدم لما ينتهي وقت المباراة (MATCH_DURATION_MS)
+ * قبل ما حدا يوصل لهدفين. لو النتيجة متعادلة (حتى 0-0) بتصير تعادل فعلي. */
+export function finishByTime(state: MatchState): MatchState {
+  if (state.status === 'finished') return state;
+  const winner: Team | 'draw' =
+    state.score.home === state.score.away ? 'draw' : state.score.home > state.score.away ? 'home' : 'away';
+  return { ...state, status: 'finished', winner };
 }
 
 function endTurnIfNeeded(state: MatchState, forcedEnd: boolean): MatchState {
