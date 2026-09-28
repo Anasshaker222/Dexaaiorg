@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { Swords, Users, Bot, Loader2, Trophy, RotateCcw, X, Crosshair, Footprints, Shield, Send, Hand } from 'lucide-react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Swords, Users, Bot, Loader2, Trophy, RotateCcw, X, Crosshair, Footprints, Shield, Send, Hand, Volume2, VolumeX } from 'lucide-react';
 import {
   applyAction,
   initialState,
@@ -12,6 +12,11 @@ import {
   moveRadius,
   aiChooseAction,
   finishByTime,
+  passChance,
+  goalCenter,
+  DIFFICULTY_LABELS,
+  type Difficulty,
+  type PlayEvent,
   NO_BOOST,
   PITCH_W,
   PITCH_H,
@@ -53,6 +58,37 @@ type Mode = 'menu' | 'local' | 'onlineSearch' | 'online';
 const VB = { x: -5, y: -3, w: PITCH_W + 10, h: PITCH_H + 6 };
 const HIT_R = 5; // نصف قطر منطقة الضغط على لاعب
 
+// مؤثرات صوتية بسيطة مولّدة بالمتصفح (بدون ملفات صوت خارجية)
+let audioCtx: AudioContext | null = null;
+function tone(freq: number, dur: number, delay = 0, type: OscillatorType = 'sine', vol = 0.07) {
+  try {
+    if (!audioCtx) audioCtx = new AudioContext();
+    const ctx = audioCtx;
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    const t0 = ctx.currentTime + delay;
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.start(t0);
+    o.stop(t0 + dur);
+  } catch {
+    /* الصوت اختياري */
+  }
+}
+
+function playSfx(kind: PlayEvent['kind'], mine: boolean) {
+  if (kind === 'goal') (mine ? [523, 659, 784, 1047] : [392, 330, 262]).forEach((f, i) => tone(f, 0.25, i * 0.12, 'triangle', 0.09));
+  else if (kind === 'miss') tone(180, 0.3, 0, 'sawtooth', 0.05);
+  else if (kind === 'pass') tone(440, 0.08, 0, 'triangle');
+  else if (kind === 'intercept') tone(220, 0.2, 0, 'square', 0.05);
+  else if (kind === 'tackleWin') tone(330, 0.15, 0, 'square', 0.05);
+  else tone(150, 0.12, 0, 'square', 0.04);
+}
+
 function dist(a: Point, b: Point) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -79,6 +115,11 @@ export default function FootballTactics() {
   const [hint, setHint] = useState('');
   const [myRank, setMyRank] = useState<PlayerRank | null>(null);
   const [reward, setReward] = useState<MatchReward | null>(null);
+  const [difficulty, setDifficulty] = useState<Difficulty>('normal');
+  const [muted, setMuted] = useState(false);
+  const [hover, setHover] = useState<Point | null>(null);
+  const [log, setLog] = useState<string[]>([]);
+  const [banner, setBanner] = useState<{ text: string; goal: boolean } | null>(null);
 
   // online-specific
   const [matchId, setMatchId] = useState<string | null>(null);
@@ -111,13 +152,13 @@ export default function FootballTactics() {
   useEffect(() => {
     if (mode !== 'local' || state.status !== 'playing' || state.turn !== 'away') return;
     const t = setTimeout(() => {
-      const action = aiChooseAction(state, 'away');
+      const action = aiChooseAction(state, 'away', difficulty);
       setState((s) => applyAction(s, action, 'away'));
       setSelected(null);
       setTurnStartedAt(Date.now());
     }, 650);
     return () => clearTimeout(t);
-  }, [mode, state]);
+  }, [mode, state, difficulty]);
 
   // وضع محلي: إنهاء الدور تلقائيًا لو خلص وقت الدور، وإنهاء المباراة تلقائيًا لو خلص وقتها الكلي
   useEffect(() => {
@@ -301,16 +342,47 @@ export default function FootballTactics() {
   const isMyTurn = state.status === 'playing' && state.turn === myTeam && (mode === 'local' ? myTeam === 'home' : true);
   const carrierPos = state.positions[state.ballOwner][state.ballIndex];
   const myMoveRadius = moveRadius(state, myTeam);
-  const tacklePct = Math.round(tackleChance(state, myTeam) * 100);
 
   const passTargets = isMyTurn ? passableTeammates(state, myTeam) : [];
   const tackleList = isMyTurn ? tacklers(state, myTeam) : [];
+  const tacklePct = Math.round(tackleChance(state, myTeam, selected !== null && tackleList.includes(selected) ? selected : tackleList[0]) * 100);
   const canShoot = isMyTurn && inShootRange(state, myTeam);
   const shootPct = canShoot ? Math.round(shootChance(state, myTeam) * 100) : 0;
   const passActive = passMode && passTargets.length > 0;
   const selPos = selected !== null && isMyTurn ? state.positions[myTeam][selected] : null;
 
   const equippedItem = RING_ITEMS.find((i) => i.id === myRank?.equipped);
+
+  // سجل آخر الأحداث (بيتصفّر مع كل مباراة جديدة)
+  useEffect(() => {
+    if (state.round === 0 && state.lastEvent === 'انطلاق المباراة') {
+      setLog([]);
+      return;
+    }
+    setLog((l) => (l[0] === state.lastEvent ? l : [state.lastEvent, ...l].slice(0, 4)));
+  }, [state.lastEvent, state.round, state.ap]);
+
+  // مؤثرات كل حدث جديد: صوت + إشعار قصير
+  const playId = state.play?.id ?? 0;
+  useEffect(() => {
+    const p = state.play;
+    if (!p) {
+      setBanner(null);
+      return;
+    }
+    const mine = p.team === myTeam;
+    if (!muted) playSfx(p.kind, mine);
+    const text =
+      p.kind === 'goal' ? (mine ? '⚽ هدف! 🎉' : '⚽ هدف للخصم')
+      : p.kind === 'intercept' ? (mine ? '✋ تمريرتك انقطعت' : '🛡️ قطعت تمريرة الخصم')
+      : p.kind === 'miss' ? (mine ? '🥅 التسديدة ضاعت' : '🧤 الخصم ضيّع التسديدة')
+      : p.kind === 'tackleWin' ? (mine ? '💪 استخلاص ناجح' : '😬 الخصم سرق الكرة')
+      : null;
+    if (!text) return;
+    setBanner({ text, goal: p.kind === 'goal' });
+    const t = setTimeout(() => setBanner(null), 1800);
+    return () => clearTimeout(t);
+  }, [playId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const matchRemainingMs = matchStartedAt !== null ? Math.max(0, MATCH_DURATION_MS - (nowTick - matchStartedAt)) : MATCH_DURATION_MS;
   const turnRemainingMs = turnStartedAt !== null ? Math.max(0, TURN_TIME_MS - (nowTick - turnStartedAt)) : TURN_TIME_MS;
@@ -323,6 +395,7 @@ export default function FootballTactics() {
     else if (mode === 'local') setTurnStartedAt(Date.now());
     setPassMode(false);
     setHint('');
+    setHover(null);
     // بعد الحركة بنخلي اللاعب محدّد عشان تقدر تحركه مرة ثانية، إلا إذا خلص الدور
     if (action.type !== 'move' || next.turn !== myTeam || next.status === 'finished') setSelected(null);
   }
@@ -337,6 +410,16 @@ export default function FootballTactics() {
       );
     }
     act({ type: 'tackle', playerIndex: idx });
+  }
+
+  // معاينة الوجهة: بتتحرك مع المؤشر/الإصبع وبتلوّن أخضر لو الحركة صالحة وأحمر لو لأ
+  function pitchMove(e: ReactPointerEvent<SVGSVGElement>) {
+    if (!isMyTurn || selected === null || state.ap <= 0 || passActive) {
+      if (hover) setHover(null);
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    setHover(toView({ x: VB.x + ((e.clientX - rect.left) / rect.width) * VB.w, y: VB.y + ((e.clientY - rect.top) / rect.height) * VB.h }));
   }
 
   function pitchClick(e: ReactMouseEvent<SVGSVGElement>) {
@@ -387,6 +470,25 @@ export default function FootballTactics() {
     act({ type: 'move', playerIndex: selected, to });
   }
 
+  // اختصارات لوحة المفاتيح: S تسديد، P تمرير، T استخلاص، E إنهاء الدور، Esc إلغاء التحديد
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || !isMyTurn) return;
+      const k = e.key.toLowerCase();
+      if (k === 's' && canShoot) act({ type: 'shoot' });
+      else if (k === 'p' && passTargets.length > 0) setPassMode((v) => !v);
+      else if (k === 't') doTackle();
+      else if (k === 'e') act({ type: 'endTurn' });
+      else if (k === 'escape') {
+        setSelected(null);
+        setPassMode(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   return (
     <div className="flex flex-col items-center gap-4 w-full" dir="rtl">
       {mode === 'menu' && (
@@ -416,6 +518,22 @@ export default function FootballTactics() {
                 </option>
               ))}
             </select>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs text-gray-400 px-1">مستوى الذكاء الاصطناعي</label>
+            <div className="grid grid-cols-3 gap-2">
+              {(['easy', 'normal', 'hard'] as Difficulty[]).map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDifficulty(d)}
+                  className={`glass rounded-xl py-2 text-sm border ${
+                    difficulty === d ? 'border-cyan-400 text-cyan-300 bg-cyan-400/10' : 'border-slate-700/50 text-gray-400'
+                  }`}
+                >
+                  {DIFFICULTY_LABELS[d]}
+                </button>
+              ))}
+            </div>
           </div>
           {myRank && (
             <div className="text-xs text-gray-400 text-center">
@@ -478,6 +596,13 @@ export default function FootballTactics() {
 
           <div className="flex items-center gap-3 text-xs text-gray-400 flex-wrap justify-center">
             <span>⏱ {formatClock(matchRemainingMs)}</span>
+            <button onClick={() => setMuted((m) => !m)} aria-label="الصوت" className="text-gray-400 hover:text-white">
+              {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            </button>
+            <span title="الطقس">{state.weather === 'wet' ? '🌧️' : state.weather === 'damp' ? '🌦️' : '☀️'}</span>
+            <span title="حماس الجمهور" className="w-14 h-1.5 rounded-full bg-slate-700 overflow-hidden">
+              <span className="block h-full bg-yellow-400 transition-all" style={{ width: `${state.crowd ?? 20}%` }} />
+            </span>
             <span>•</span>
             <span className={isMyTurn ? 'text-emerald-400 font-bold' : ''}>{isMyTurn ? 'دورك الآن' : 'دور الخصم'}</span>
             <span>•</span>
@@ -496,6 +621,8 @@ export default function FootballTactics() {
           <svg
             viewBox={`${VB.x} ${VB.y} ${VB.w} ${VB.h}`}
             onClick={pitchClick}
+            onPointerMove={pitchMove}
+            onPointerLeave={() => setHover(null)}
             className={`w-full rounded-xl border border-emerald-500/20 select-none ${isMyTurn ? 'cursor-pointer' : ''}`}
             style={{ aspectRatio: `${VB.w} / ${VB.h}`, maxWidth: 560, direction: 'ltr', touchAction: 'manipulation' }}
           >
@@ -513,6 +640,15 @@ export default function FootballTactics() {
               <rect x={PITCH_W - 16} y={PITCH_H / 2 - 20} width={16} height={40} />
             </g>
             <circle cx={PITCH_W / 2} cy={PITCH_H / 2} r={0.9} fill="rgba(255,255,255,0.6)" />
+            <g fill="none" stroke="rgba(255,255,255,0.45)" strokeWidth={0.5}>
+              <rect x={0} y={PITCH_H / 2 - 10} width={6} height={20} />
+              <rect x={PITCH_W - 6} y={PITCH_H / 2 - 10} width={6} height={20} />
+              <path d={`M 16 ${PITCH_H / 2 - 7.5} A 9 9 0 0 1 16 ${PITCH_H / 2 + 7.5}`} />
+              <path d={`M ${PITCH_W - 16} ${PITCH_H / 2 - 7.5} A 9 9 0 0 0 ${PITCH_W - 16} ${PITCH_H / 2 + 7.5}`} />
+              <path d={`M 0 2 A 2 2 0 0 0 2 0 M ${PITCH_W - 2} 0 A 2 2 0 0 0 ${PITCH_W} 2 M 2 ${PITCH_H} A 2 2 0 0 0 0 ${PITCH_H - 2} M ${PITCH_W} ${PITCH_H - 2} A 2 2 0 0 0 ${PITCH_W - 2} ${PITCH_H}`} />
+            </g>
+            <circle cx={11} cy={PITCH_H / 2} r={0.6} fill="rgba(255,255,255,0.6)" />
+            <circle cx={PITCH_W - 11} cy={PITCH_H / 2} r={0.6} fill="rgba(255,255,255,0.6)" />
 
             {/* المرامي ومنطقة التسجيل */}
             <g fill="rgba(250,204,21,0.25)" stroke="#facc15" strokeWidth={0.5}>
@@ -541,6 +677,36 @@ export default function FootballTactics() {
               );
             })()}
 
+            {/* معاينة الحركة وخط التسديد */}
+            {hover && selPos && state.ap > 0 && !passActive && (() => {
+              const to = { x: clamp(hover.x, 0, PITCH_W), y: clamp(hover.y, 0, PITCH_H) };
+              const ok = dist(selPos, to) <= myMoveRadius && isValidMove(state, myTeam, selected ?? 0, to);
+              const a = toView(selPos);
+              const b = toView(to);
+              const c = ok ? '#4ade80' : '#f87171';
+              return (
+                <g pointerEvents="none">
+                  <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={c} strokeOpacity={0.6} strokeWidth={0.4} strokeDasharray="1 1" />
+                  <circle cx={b.x} cy={b.y} r={R_PLAYER} fill={c} fillOpacity={0.25} stroke={c} strokeWidth={0.4} />
+                </g>
+              );
+            })()}
+            {canShoot && !passActive && (() => {
+              const a = toView(carrierPos);
+              const g = toView(goalCenter(myTeam));
+              return <line x1={a.x} y1={a.y} x2={g.x} y2={g.y} stroke="#facc15" strokeOpacity={0.25} strokeWidth={0.4} strokeDasharray="2 1.5" pointerEvents="none" />;
+            })()}
+
+            {/* خطوط التمرير المتاحة */}
+            {passActive &&
+              passTargets.map((i) => {
+                const a = toView(carrierPos);
+                const b = toView(state.positions[myTeam][i]);
+                return (
+                  <line key={`pl-${i}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#fde047" strokeOpacity={0.35} strokeWidth={0.4} strokeDasharray="1.2 1.2" pointerEvents="none" />
+                );
+              })}
+
             {/* اللاعبين */}
             {(['home', 'away'] as Team[]).flatMap((t) =>
               state.positions[t].map((p, i) => {
@@ -557,10 +723,19 @@ export default function FootballTactics() {
                     style={{ transform: `translate(${v.x}px, ${v.y}px)`, transition: 'transform 350ms ease' }}
                   >
                     {isPassTarget && <circle r={R_PLAYER + 1.8} fill="none" stroke="#fde047" strokeWidth={0.7} />}
+                    {isPassTarget && (
+                      <text y={-R_PLAYER - 2.6} textAnchor="middle" fontSize={2.8} fontWeight={700} fill="#fde047" style={{ pointerEvents: 'none' }}>
+                        {Math.round(passChance(state, myTeam, i) * 100)}%
+                      </text>
+                    )}
                     {isTackler && (
                       <circle r={R_PLAYER + 1.8} fill="none" stroke="#f87171" strokeWidth={0.6} strokeDasharray="1 1" />
                     )}
-                    <circle r={R_PLAYER} fill={t === 'home' ? '#06b6d4' : '#f43f5e'} stroke={stroke} strokeWidth={strokeW} />
+                    <ellipse cy={R_PLAYER * 0.9} rx={R_PLAYER} ry={R_PLAYER * 0.4} fill="rgba(0,0,0,0.3)" />
+                    {state.ballOwner === t && state.ballIndex === i && (
+                      <circle r={R_PLAYER + 1} fill="none" stroke="#fde047" strokeOpacity={0.6} strokeWidth={0.5} />
+                    )}
+                    <circle r={R_PLAYER} fill={i === 0 ? (t === 'home' ? '#0e7490' : '#9f1239') : t === 'home' ? '#06b6d4' : '#f43f5e'} stroke={stroke} strokeWidth={strokeW} />
                     <text
                       textAnchor="middle"
                       dominantBaseline="central"
@@ -569,7 +744,7 @@ export default function FootballTactics() {
                       fill="#ffffff"
                       style={{ pointerEvents: 'none' }}
                     >
-                      {i + 1}
+                      {i === 0 ? 'ح' : i + 1}
                     </text>
                   </g>
                 );
@@ -588,7 +763,24 @@ export default function FootballTactics() {
             })()}
           </svg>
 
-          <p className="text-xs text-gray-400 min-h-4">{hint || state.lastEvent}</p>
+          {banner ? (
+            <p
+              className={`animate-scale-in font-display font-bold px-4 py-1.5 rounded-full text-sm ${
+                banner.goal ? 'bg-yellow-400/20 text-yellow-300 border border-yellow-400/40' : 'glass text-white'
+              }`}
+            >
+              {banner.text}
+            </p>
+          ) : (
+            <p className="text-xs text-gray-400 min-h-4">{hint || state.lastEvent}</p>
+          )}
+          {log.length > 1 && (
+            <ul className="text-[11px] text-gray-600 text-center leading-relaxed">
+              {log.slice(1).map((e, i) => (
+                <li key={i} style={{ opacity: 1 - i * 0.3 }}>{e}</li>
+              ))}
+            </ul>
+          )}
 
           {isMyTurn && state.status === 'playing' && (
             <div className="flex flex-col items-center gap-2 w-full">
@@ -647,6 +839,30 @@ export default function FootballTactics() {
                   ? 'فزت بالمباراة! 🎉'
                   : 'خسرت هالمرة، حظ أوفر'}
               </p>
+              {state.stats &&
+                (() => {
+                  const a = state.stats[myTeam];
+                  const b = state.stats[oppTeam];
+                  const pt = (a.poss ?? 0) + (b.poss ?? 0);
+                  const pa = pt ? Math.round(((a.poss ?? 0) / pt) * 100) : 50;
+                  const rows: [string, string, string][] = [
+                    [`${a.passesOk}/${a.passes}`, 'تمريرات ناجحة', `${b.passesOk}/${b.passes}`],
+                    [`${pa}%`, 'استحواذ', `${100 - pa}%`],
+                    [`${a.shots}`, 'تسديدات', `${b.shots}`],
+                    [`${a.tacklesWon}/${a.tackles}`, 'استخلاصات', `${b.tacklesWon}/${b.tackles}`],
+                  ];
+                  return (
+                    <div className="grid grid-cols-3 gap-x-6 gap-y-1 text-xs text-center w-full">
+                      {rows.map(([x, l, y]) => (
+                        <div key={l} className="contents">
+                          <span className="text-emerald-300 font-bold">{x}</span>
+                          <span className="text-gray-400">{l}</span>
+                          <span className="text-gray-300 font-bold">{y}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
               {mode === 'online' && reward && (
                 <div className="text-center text-xs text-gray-300 flex flex-col gap-1">
                   <span className="text-emerald-400 font-bold">+{reward.xpGain} XP</span>
