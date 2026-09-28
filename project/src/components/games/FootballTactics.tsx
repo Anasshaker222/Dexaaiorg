@@ -58,6 +58,9 @@ type Mode = 'menu' | 'local' | 'onlineSearch' | 'online';
 const VB = { x: -5, y: -3, w: PITCH_W + 10, h: PITCH_H + 6 };
 const HIT_R = 5; // نصف قطر منطقة الضغط على لاعب
 
+import { lazy, Suspense } from 'react';
+const Pitch3D = lazy(() => import('./Pitch3D'));
+
 // مؤثرات صوتية بسيطة مولّدة بالمتصفح (بدون ملفات صوت خارجية)
 let audioCtx: AudioContext | null = null;
 function tone(freq: number, dur: number, delay = 0, type: OscillatorType = 'sine', vol = 0.07) {
@@ -117,6 +120,7 @@ export default function FootballTactics() {
   const [reward, setReward] = useState<MatchReward | null>(null);
   const [difficulty, setDifficulty] = useState<Difficulty>('normal');
   const [muted, setMuted] = useState(false);
+  const [view3d, setView3d] = useState(false);
   const [hover, setHover] = useState<Point | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const [banner, setBanner] = useState<{ text: string; goal: boolean } | null>(null);
@@ -599,6 +603,7 @@ export default function FootballTactics() {
             <button onClick={() => setMuted((m) => !m)} aria-label="الصوت" className="text-gray-400 hover:text-white">
               {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
+            <button onClick={() => setView3d((v) => !v)} className={`text-xs px-2 py-0.5 rounded-md border ${view3d ? "border-cyan-400 text-cyan-300" : "border-slate-600 text-gray-400"}`}>3D</button>
             <span title="الطقس">{state.weather === 'wet' ? '🌧️' : state.weather === 'damp' ? '🌦️' : '☀️'}</span>
             <span title="حماس الجمهور" className="w-14 h-1.5 rounded-full bg-slate-700 overflow-hidden">
               <span className="block h-full bg-yellow-400 transition-all" style={{ width: `${state.crowd ?? 20}%` }} />
@@ -618,6 +623,11 @@ export default function FootballTactics() {
           </div>
 
           {/* الملعب */}
+          {view3d && (
+            <Suspense fallback={<div className="text-xs text-gray-400">جاري تحميل الملعب ثلاثي الأبعاد…</div>}>
+              <Pitch3D state={state} myTeam={myTeam} />
+            </Suspense>
+          )}
           <svg
             viewBox={`${VB.x} ${VB.y} ${VB.w} ${VB.h}`}
             onClick={pitchClick}

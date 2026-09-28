@@ -18,7 +18,7 @@ export const MAX_SHOOT_DIST = 100; // أقصى مسافة للتسديد عن م
 export const AP_PER_TURN = 2;
 export const MAX_GOALS = 2; // أول فريق يوصل هدفين بيكسب فورًا
 export const TEAM_SIZE = 11; // 11 ضد 11
-export const AUTO_STEP = 3; // أقصى مسافة بيتحركها اللاعب الغير متحكم فيه تلقائيًا بكل حركة
+export const AUTO_STEP = 4; // أقصى مسافة بيتحركها اللاعب الغير متحكم فيه تلقائيًا بكل حركة
 
 // وقت المباراة الكلي ووقت كل دور - بيتحكم فيهم المكوّن (مش المحرك نفسه، لأنه المحرك نقي
 // وما بيعرف الوقت الحقيقي)، بس القيم مركزية هون حتى تنقرا بمكان وحد.
@@ -197,20 +197,78 @@ function boostOf(state: MatchState, team: Team): Boost {
   return state.boosts?.[team] ?? NO_BOOST;
 }
 
-/** المكان "المثالي" للاعب رقم i بفريق team: مكانه بالتشكيلة الأصلية، منزاح شوي باتجاه
- * الكرة (الفريق كله بيتحرك زي وحدة وحدة لقدام وهو بيهاجم ولورا وهو بيدافع، بدل ما يضل
- * واقف مكانه لحد ما توصله الكرة أو يجي دوره). الحارس ما بينزاح كتير عن مرماه. */
+/** أقرب لاعبين (غير الحارس) لحامل الكرة الخصم: هدول بيضغطوا عليه بسرعة أكبر. */
+function pressers(state: MatchState, team: Team): number[] {
+  if (state.ballOwner === team) return [];
+  const ball = state.positions[state.ballOwner][state.ballIndex];
+  return state.positions[team]
+    .map((p, i) => ({ i, d: dist(p, ball) }))
+    .filter((o) => o.i > 0)
+    .sort((x, y) => x.d - y.d)
+    .slice(0, 2)
+    .map((o) => o.i);
+}
+
+/** المكان "المثالي" للاعب رقم i: حركة الفريق كوحدة منظّمة حسب طور اللعب.
+ * - هجوم: الدفاع بيرفع الخط ويحافظ عليه، الوسط بيدعم حامل الكرة من زوايا على الجانبين،
+ *   والمهاجمين بيجروا لقدام الكرة مع الحفاظ على العرض.
+ * - دفاع: الفريق بينضغط عرضًا باتجاه الكرة (تماسك)، اثنين بيضغطوا على الحامل، وباقي
+ *   المدافعين والوسط بيراقبوا أقرب مهاجم من جهة المرمى، والمهاجمين بيضلوا متقدمين للمرتدة. */
 function targetSlot(state: MatchState, team: Team, i: number): Point {
   const f = state.formations?.[team] ?? DEFAULT_FORMATION;
   const base = formation(team, f)[i];
   if (!base) return { x: PITCH_W / 2, y: PITCH_H / 2 };
-  if (i === 0) return base; // الحارس يضل قريب من مرماه
   const ball = state.positions[state.ballOwner][state.ballIndex];
-  const blend = 0.28;
-  return {
-    x: clamp(base.x * (1 - blend) + ball.x * blend, 4, PITCH_W - 4),
-    y: clamp(base.y * (1 - blend) + ball.y * blend * 0.5, 4, PITCH_H - 4),
-  };
+  if (i === 0) return { x: base.x, y: clamp(base.y + (ball.y - base.y) * 0.15, PITCH_H / 2 - 8, PITCH_H / 2 + 8) };
+
+  const dir = team === 'home' ? 1 : -1;
+  const toX = (u: number) => (team === 'home' ? u : PITCH_W - u);
+  const bu = team === 'home' ? ball.x : PITCH_W - ball.x; // تقدّم الكرة بمنظور هالفريق
+  const bp = team === 'home' ? base.x : PITCH_W - base.x; // تقدّم مكان اللاعب الأصلي
+  const role = roleOf(state, team, i);
+  const attacking = state.ballOwner === team;
+  let u: number;
+  let y: number;
+
+  if (attacking) {
+    if (role === 'def') {
+      u = clamp(bu - 34, Math.max(20, bp - 8), bp + 30);
+      y = base.y * 0.8 + ball.y * 0.2;
+    } else if (role === 'mid') {
+      u = clamp(bu - 8, 30, PITCH_W - 30);
+      y = clamp(ball.y + (base.y >= PITCH_H / 2 ? 14 : -14), 6, PITCH_H - 6); // زاوية دعم على جانب الكرة
+    } else {
+      u = clamp(bu + 14, 60, PITCH_W - 10);
+      y = base.y * 0.85 + ball.y * 0.15; // الحفاظ على العرض
+    }
+    return { x: clamp(toX(u), 4, PITCH_W - 4), y: clamp(y, 4, PITCH_H - 4) };
+  }
+
+  // دفاع
+  if (pressers(state, team).includes(i)) {
+    return { x: clamp(ball.x - dir * (MIN_SEP + 1.5), 4, PITCH_W - 4), y: clamp(ball.y, 4, PITCH_H - 4) };
+  }
+  if (role === 'def') u = clamp(Math.min(bu - 10, bp + 10), 12, 55);
+  else if (role === 'mid') u = clamp(bu - 6, 28, 85);
+  else u = clamp(bu + 6, 55, 100);
+  y = ball.y + (base.y - ball.y) * 0.6; // تماسك: انضغاط باتجاه الكرة
+  let t: Point = { x: toX(u), y };
+  if (role !== 'fwd') {
+    // مراقبة أقرب مهاجم (غير الحامل) من جهة المرمى
+    const opps = state.positions[opp(team)];
+    let best = -1;
+    let bd = 22;
+    opps.forEach((o, j) => {
+      if (j === 0 || j === state.ballIndex) return;
+      const d = dist(o, t);
+      if (d < bd) {
+        bd = d;
+        best = j;
+      }
+    });
+    if (best >= 0) t = { x: opps[best].x - dir * 3.5, y: opps[best].y + (ball.y - opps[best].y) * 0.15 };
+  }
+  return { x: clamp(t.x, 4, PITCH_W - 4), y: clamp(t.y, 4, PITCH_H - 4) };
 }
 
 /** بتحرّك كل لاعب ما عدا اللي انحرك بالحركة الحالية (وحامل الكرة، إلا إذا هو نفسه المستثنى)
@@ -225,7 +283,7 @@ function autoAdjust(state: MatchState, exempt: { team: Team; index: number } | n
       const target = targetSlot(state, team, i);
       const d = dist(p, target);
       if (d < 0.5) return p;
-      const step = Math.min(AUTO_STEP, d);
+      const step = Math.min(AUTO_STEP * (pressers(state, team).includes(i) ? 1.7 : 1), d);
       const ang = Math.atan2(target.y - p.y, target.x - p.x);
       const np = {
         x: clamp(p.x + Math.cos(ang) * step, 0, PITCH_W),
