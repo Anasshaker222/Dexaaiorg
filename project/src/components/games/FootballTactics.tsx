@@ -773,6 +773,22 @@ export default function FootballTactics() {
             })()}
           </svg>
 
+          <section aria-label="دليل اللعب" className="w-full max-w-[560px] rounded-xl border border-emerald-400/15 bg-slate-950/45 px-3 py-2.5">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-emerald-300">طريقة اللعب</span>
+              <span className="text-[10px] text-gray-500">{state.ballOwner === myTeam ? 'استحوذ على الكرة وتقدّم نحو المرمى' : 'اقترب من حامل الكرة وحاول استخلاصها'}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-4">
+              <div><span className="block text-[11px] font-semibold text-cyan-300">١ · تحرّك</span><span className="text-[10px] text-gray-400">اختر لاعبًا ثم اضغط المكان المطلوب</span></div>
+              <div><span className="block text-[11px] font-semibold text-yellow-300">٢ · مرّر</span><span className="text-[10px] text-gray-400">اضغط تمرير ثم اختر زميلًا مضيئًا</span></div>
+              <div><span className="block text-[11px] font-semibold text-rose-300">٣ · استخلص</span><span className="text-[10px] text-gray-400">اختر لاعبًا محاطًا بالأحمر ثم اضغط استخلاص</span></div>
+              <div><span className="block text-[11px] font-semibold text-amber-200">٤ · سدّد</span><span className="text-[10px] text-gray-400">سدّد عندما تظهر فرصة التسديد</span></div>
+            </div>
+            <p className="mt-2 border-t border-white/5 pt-2 text-center text-[10px] text-gray-500" dir="ltr">
+              اختصارات لوحة المفاتيح: S تسديد · P تمرير · T استخلاص · E إنهاء الدور · Esc إلغاء التحديد
+            </p>
+          </section>
+
           {banner ? (
             <p
               className={`animate-scale-in font-display font-bold px-4 py-1.5 rounded-full text-sm ${
