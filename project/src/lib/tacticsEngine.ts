@@ -13,6 +13,7 @@ export const R_PLAYER = 2.6; // نصف قطر اللاعب (للرسم فقط)
 export const MOVE_RADIUS = 18; // أقصى مسافة بيتحركها لاعب بحركة وحدة
 export const MIN_SEP = 6; // أقل مسافة مسموحة بين لاعبين
 export const TACKLE_RANGE = 10; // أقصى مسافة للاستخلاص
+export const TACKLE_WIN_THRESHOLD = 0.58; // الحد الأدنى لقوة التحام ناجح
 export const PASS_RANGE = 60; // أقصى مسافة للتمرير
 export const MAX_SHOOT_DIST = 100; // أقصى مسافة للتسديد عن مركز المرمى
 export const AP_PER_TURN = 2;
@@ -328,7 +329,7 @@ export function passRange(state: MatchState, team: Team): number {
   return PASS_RANGE + boostOf(state, team).pass;
 }
 
-/** احتمال نجاح استخلاص الفريق للكرة (مع بطاقته وبطاقة حامل الكرة). */
+/** قوة التحام محسوبة من المسافة والدور والبطاقات؛ تُستخدم كحد نجاح حتمي. */
 export function tackleChance(state: MatchState, team: Team, playerIndex?: number): number {
   // التوقيت والمسافة مهمين: الالتحام القريب أسهل من مد الرجل من آخر مدى الاستخلاص.
   const opponent = opp(team);
@@ -488,13 +489,40 @@ function goalkeeperSaveChance(state: MatchState, team: Team): number {
   return clamp(0.54 - lineGap * 0.035 + (14 - goalDistance) * 0.008, 0.12, 0.72);
 }
 
-/** احتمال نجاح التمريرة: بتنقص مع المسافة ومع كل مدافع واقف بخط التمريرة. */
+/** Returns the defender who can physically reach the lane of this pass. */
+function passInterceptor(state: MatchState, team: Team, toIndex: number): number | null {
+  const from = state.positions[team][state.ballIndex];
+  const to = state.positions[team][toIndex];
+  if (!from || !to) return null;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const lengthSquared = dx * dx + dy * dy || 1;
+  const interceptionRadius = 1.5
+    + (1 - boostOf(state, team).pass) * 1.4
+    + TUNING.weatherPass[state.weather ?? 'dry'] * 3;
+  let interceptedBy: number | null = null;
+  let closestInterception = Infinity;
+  state.positions[opp(team)].forEach((defender, i) => {
+    const progress = ((defender.x - from.x) * dx + (defender.y - from.y) * dy) / lengthSquared;
+    if (progress < 0.12 || progress > 0.9) return;
+    const gap = distToSegment(defender, from, to);
+    if (gap <= interceptionRadius && gap < closestInterception) {
+      closestInterception = gap;
+      interceptedBy = i;
+    }
+  });
+  return interceptedBy;
+}
+
+/** Pass quality is reduced by distance, weather, and a defender in the actual lane. */
 export function passChance(state: MatchState, team: Team, toIndex: number): number {
   const from = state.positions[team][state.ballIndex];
   const to = state.positions[team][toIndex];
   if (!from || !to) return 0;
-  const blockers = state.positions[opp(team)].filter((p) => distToSegment(p, from, to) <= 4).length;
-  return clamp(0.97 - 0.2 * (dist(from, to) / passRange(state, team)) - 0.22 * blockers - TUNING.weatherPass[state.weather ?? 'dry'], 0.3, 0.97);
+  const intercepted = passInterceptor(state, team, toIndex) !== null;
+  const distancePenalty = 0.2 * (dist(from, to) / passRange(state, team));
+  const lanePenalty = intercepted ? 0.48 : 0;
+  return clamp(0.97 - distancePenalty - lanePenalty - TUNING.weatherPass[state.weather ?? 'dry'], 0.3, 0.97);
 }
 
 export function passableTeammates(state: MatchState, team: Team): number[] {
@@ -579,7 +607,9 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
       next = autoAdjust(next, { team: opp(actingTeam), index: stealer });
       return finishIfNeeded(endTurnIfNeeded(next, true));
     }
-    const ok = rnd(next) < passChance(state, actingTeam, action.toPlayerIndex);
+    const interceptedBy = passInterceptor(state, actingTeam, action.toPlayerIndex);
+    // A pass is cut only when a defender is actually close to its route.
+    const ok = interceptedBy === null;
     next.ap -= 1;
     if (ok) {
       next.ballIndex = action.toPlayerIndex;
@@ -589,19 +619,8 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
       return finishIfNeeded(endTurnIfNeeded(next, false));
     }
     // التمريرة انقطعت: الكرة بتروح لأقرب مدافع لخط التمريرة وبينتهي الدور
-    const from = state.positions[actingTeam][state.ballIndex];
-    const to = state.positions[actingTeam][action.toPlayerIndex];
-    let stealer = 0;
-    let best = Infinity;
-    state.positions[opp(actingTeam)].forEach((p, i) => {
-      const d = distToSegment(p, from, to);
-      if (d < best) {
-        best = d;
-        stealer = i;
-      }
-    });
     next.ballOwner = opp(actingTeam);
-    next.ballIndex = stealer;
+    next.ballIndex = interceptedBy ?? 0;
     next.ap = 0;
     next.lastEvent = 'تمريرة مقطوعة! الكرة راحت للخصم';
     next = record(next, actingTeam, 'intercept', { passes: 1 });
@@ -666,14 +685,14 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
 
   if (action.type === 'tackle') {
     if (!tacklers(state, actingTeam).includes(action.playerIndex)) return state;
-    const success = rnd(next) < tackleChance(state, actingTeam, action.playerIndex);
+    const success = tackleChance(state, actingTeam, action.playerIndex) >= TACKLE_WIN_THRESHOLD;
     next.ap -= 1;
     if (success) {
       next.lastEvent = 'استخلاص ناجح للكرة!';
       next.ballOwner = actingTeam;
       next.ballIndex = action.playerIndex;
     } else {
-      next.lastEvent = 'محاولة استخلاص فاشلة';
+      next.lastEvent = 'حامل الكرة حمى الكرة — اقترب أكثر قبل محاولة الاستخلاص';
     }
     next = record(next, actingTeam, success ? 'tackleWin' : 'tackleFail', { tackles: 1, tacklesWon: success ? 1 : 0 });
     next = autoAdjust(next, { team: actingTeam, index: action.playerIndex });
@@ -730,10 +749,10 @@ function stepToward(state: MatchState, team: Team, idx: number, target: Point): 
   return null;
 }
 
-const AI_TUNING: Record<Difficulty, { shoot: number; pass: number; tackle: number; passMin: number; smart: boolean }> = {
-  easy: { shoot: 0.48, pass: 0.32, tackle: 0.55, passMin: 0.58, smart: false },
-  normal: { shoot: 0.46, pass: 0.54, tackle: 0.62, passMin: 0.55, smart: false },
-  hard: { shoot: 0.32, pass: 0.82, tackle: 0.92, passMin: 0.58, smart: true },
+const AI_TUNING: Record<Difficulty, { shoot: number; pass: number; passMin: number; smart: boolean }> = {
+  easy: { shoot: 0.48, pass: 0.32, passMin: 0.58, smart: false },
+  normal: { shoot: 0.46, pass: 0.54, passMin: 0.55, smart: false },
+  hard: { shoot: 0.32, pass: 0.82, passMin: 0.58, smart: true },
 };
 
 /** المراوغة الذكية: بيجرّب 24 اتجاه، وبيختار الأقرب للمرمى مع الابتعاد عن المدافعين. */
@@ -803,9 +822,9 @@ export function aiChooseAction(state: MatchState, team: Team, level: Difficulty 
 
   const mine = tacklers(state, team);
   const enemyCarrier = state.positions[opp(team)][state.ballIndex];
-  if (mine.length > 0 && decisionRoll < tune.tackle) {
+  if (mine.length > 0) {
     const bestTackler = mine.reduce((a, b) => tackleChance(state, team, b) > tackleChance(state, team, a) ? b : a);
-    if (tackleChance(state, team, bestTackler) >= 0.4) return { type: 'tackle', playerIndex: bestTackler };
+    if (tackleChance(state, team, bestTackler) >= TACKLE_WIN_THRESHOLD) return { type: 'tackle', playerIndex: bestTackler };
   }
   // قرّب أقرب لاعب (غير الحارس) من حامل الكرة الخصم لحد ما يصير بمدى الاستخلاص
   let bestIdx = 1;

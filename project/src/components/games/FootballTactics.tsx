@@ -10,6 +10,7 @@ import {
   shootChance,
   tackleChance,
   liveMoveRadius,
+  TACKLE_WIN_THRESHOLD,
   aiChooseAction,
   finishByTime,
   passChance,
@@ -334,7 +335,7 @@ export default function FootballTactics() {
 
   const passTargets = isMyTurn ? passableTeammates(state, myTeam) : [];
   const tackleList = isMyTurn ? tacklers(state, myTeam) : [];
-  const tacklePct = Math.round(tackleChance(state, myTeam, selected !== null && tackleList.includes(selected) ? selected : tackleList[0]) * 100);
+  const tackleStrength = Math.round(tackleChance(state, myTeam, selected !== null && tackleList.includes(selected) ? selected : tackleList[0]) * 100);
   const canShoot = isMyTurn && inShootRange(state, myTeam);
   const shootPct = canShoot ? Math.round(shootChance(state, myTeam) * 100) : 0;
   const passActive = passMode && passTargets.length > 0;
@@ -850,9 +851,10 @@ export default function FootballTactics() {
                 {tackleList.length > 0 && (
                   <button
                     onClick={doTackle}
+                    title={`تنجح المحاولة عند قوة التحام ${Math.round(TACKLE_WIN_THRESHOLD * 100)}٪ أو أكثر`}
                     className="glass min-h-11 rounded-lg px-4 py-2.5 text-sm font-semibold flex items-center gap-2 border border-red-400/40 text-red-300 touch-manipulation"
                   >
-                    <Hand className="w-3.5 h-3.5" /> استخلاص ({tacklePct}%)
+                    <Hand className="w-3.5 h-3.5" /> استخلاص · القوة {tackleStrength}%
                   </button>
                 )}
               </div>
