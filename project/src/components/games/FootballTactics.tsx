@@ -55,7 +55,7 @@ type Mode = 'menu' | 'local' | 'onlineSearch' | 'online';
 
 // حدود الرسم (مع هامش للمرامي برا الملعب)
 const VB = { x: -5, y: -3, w: PITCH_W + 10, h: PITCH_H + 6 };
-const HIT_R = 5; // نصف قطر منطقة الضغط على لاعب
+const HIT_R = 7; // Larger tap target for touch screens
 
 import { lazy, Suspense } from 'react';
 const Pitch3D = lazy(() => import('./Pitch3D'));
@@ -448,22 +448,26 @@ export default function FootballTactics() {
       return;
     }
 
-    if (selected === null) {
-      setHint('دوس على لاعبك أول');
-      return;
-    }
-    const from = mine[selected];
+    // On an empty-pitch tap, choose a useful player automatically so mobile
+    // players can move in one gesture instead of selecting first.
+    const playerIndex = selected ?? (state.ballOwner === myTeam
+      ? state.ballIndex
+      : mine.reduce((bestIndex, point, index) => {
+          if (index === 0) return bestIndex;
+          return dist(point, p) < dist(mine[bestIndex], p) ? index : bestIndex;
+        }, 1));
+    const from = mine[playerIndex];
     if (state.ap <= 0) return;
-    if (dist(from, p) > myMoveRadius) {
-      setHint('بعيد كتير، دوس جوا الدايرة');
+    const target = { x: clamp(p.x, 0, PITCH_W), y: clamp(p.y, 0, PITCH_H) };
+    const distance = dist(from, target);
+    const scale = distance > myMoveRadius ? myMoveRadius / distance : 1;
+    const to = { x: from.x + (target.x - from.x) * scale, y: from.y + (target.y - from.y) * scale };
+    if (!isValidMove(state, myTeam, playerIndex, to)) {
+      setHint('جرّب مكانًا قريبًا من اللاعب أو المس لاعبًا آخر');
       return;
     }
-    const to = { x: clamp(p.x, 0, PITCH_W), y: clamp(p.y, 0, PITCH_H) };
-    if (!isValidMove(state, myTeam, selected, to)) {
-      setHint('مكان غير صالح، قريب كتير من لاعب ثاني');
-      return;
-    }
-    act({ type: 'move', playerIndex: selected, to });
+    setSelected(playerIndex);
+    act({ type: 'move', playerIndex, to });
   }
 
   function pitchClick(e: ReactMouseEvent<SVGSVGElement>) {
@@ -645,7 +649,7 @@ export default function FootballTactics() {
             onPointerMove={pitchMove}
             onPointerLeave={() => setHover(null)}
             className={`w-full rounded-xl border border-emerald-500/20 select-none ${isMyTurn ? 'cursor-pointer' : ''}`}
-            style={{ aspectRatio: `${VB.w} / ${VB.h}`, maxWidth: 560, direction: 'ltr', touchAction: 'manipulation' }}
+            style={{ aspectRatio: `${VB.w} / ${VB.h}`, maxWidth: 560, direction: 'ltr', touchAction: 'none' }}
           >
             <rect x={VB.x} y={VB.y} width={VB.w} height={VB.h} fill="#052e1a" />
             {Array.from({ length: 10 }).map((_, i) => (
@@ -793,7 +797,7 @@ export default function FootballTactics() {
               <span className="text-[10px] text-gray-500">{state.ballOwner === myTeam ? 'استحوذ على الكرة وتقدّم نحو المرمى' : 'اقترب من حامل الكرة وحاول استخلاصها'}</span>
             </div>
             <div className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-4">
-              <div><span className="block text-[11px] font-semibold text-cyan-300">١ · تحرّك</span><span className="text-[10px] text-gray-400">اختر لاعبًا ثم اضغط المكان المطلوب</span></div>
+              <div><span className="block text-[11px] font-semibold text-cyan-300">١ · تحرّك</span><span className="text-[10px] text-gray-400">الكمبيوتر: اختر ثم انقر · الجوال: المس المكان للتحريك مباشرة</span></div>
               <div><span className="block text-[11px] font-semibold text-yellow-300">٢ · مرّر</span><span className="text-[10px] text-gray-400">اضغط تمرير ثم اختر زميلًا مضيئًا</span></div>
               <div><span className="block text-[11px] font-semibold text-rose-300">٣ · استخلص</span><span className="text-[10px] text-gray-400">اختر لاعبًا محاطًا بالأحمر ثم اضغط استخلاص</span></div>
               <div><span className="block text-[11px] font-semibold text-amber-200">٤ · سدّد</span><span className="text-[10px] text-gray-400">سدّد عندما تظهر فرصة التسديد</span></div>
@@ -828,7 +832,7 @@ export default function FootballTactics() {
                 {canShoot && (
                   <button
                     onClick={() => act({ type: 'shoot' })}
-                    className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-yellow-400/40 text-yellow-300"
+                    className="glass min-h-11 rounded-lg px-4 py-2.5 text-sm font-semibold flex items-center gap-2 border border-yellow-400/40 text-yellow-300 touch-manipulation"
                   >
                     <Crosshair className="w-3.5 h-3.5" /> تسديد ({shootPct}%)
                   </button>
@@ -836,7 +840,7 @@ export default function FootballTactics() {
                 {passTargets.length > 0 && (
                   <button
                     onClick={() => setPassMode((v) => !v)}
-                    className={`glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border ${
+                    className={`glass min-h-11 rounded-lg px-4 py-2.5 text-sm font-semibold flex items-center gap-2 border touch-manipulation ${
                       passActive ? 'border-yellow-300 text-yellow-200 bg-yellow-400/10' : 'border-slate-600'
                     }`}
                   >
@@ -846,7 +850,7 @@ export default function FootballTactics() {
                 {tackleList.length > 0 && (
                   <button
                     onClick={doTackle}
-                    className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-red-400/40 text-red-300"
+                    className="glass min-h-11 rounded-lg px-4 py-2.5 text-sm font-semibold flex items-center gap-2 border border-red-400/40 text-red-300 touch-manipulation"
                   >
                     <Hand className="w-3.5 h-3.5" /> استخلاص ({tacklePct}%)
                   </button>
