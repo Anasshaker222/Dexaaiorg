@@ -163,7 +163,7 @@ export default function FootballTactics() {
       if (current.status !== 'playing') return;
       const action = aiChooseAction(current, 'away', difficulty);
       setState((s) => applyLiveAction(s, action, 'away'));
-    }, 850);
+    }, 1250);
     return () => clearInterval(timer);
   }, [mode, state.status, difficulty]);
 
@@ -380,7 +380,7 @@ export default function FootballTactics() {
   function act(action: Action) {
     if (action.type === 'move') {
       const now = Date.now();
-      if (now - lastLiveMoveAt.current < 450) return;
+      if (now - lastLiveMoveAt.current < 700) return;
       lastLiveMoveAt.current = now;
     }
     if (mode === 'online' && matchId) {

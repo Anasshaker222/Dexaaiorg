@@ -24,7 +24,7 @@ export const AUTO_STEP = 4; // أقصى مسافة بيتحركها اللاعب
 // وما بيعرف الوقت الحقيقي)، بس القيم مركزية هون حتى تنقرا بمكان وحد.
 export const MATCH_DURATION_MS = 8 * 60 * 1000; // مدة المباراة: 8 دقائق. لو خلص الوقت، الفوز للي قدام بالنتيجة
 export const TURN_TIME_MS = 20 * 1000; // كل ما توصلك الكرة أو يصير دورك، عندك 20 ثانية تلعب فيها، وإلا بتروح الكرة للطرف التاني
-export const LIVE_MOVE_RADIUS = 4.8; // حركة قصيرة في المباراة الحية لتقريب سرعة اللاعب من الركض الواقعي
+export const LIVE_MOVE_RADIUS = 3.8; // حركة قصيرة في المباراة الحية لتقريب سرعة اللاعب من الركض الواقعي
 
 export type Team = 'home' | 'away';
 export type Point = { x: number; y: number };
@@ -732,7 +732,7 @@ function stepToward(state: MatchState, team: Team, idx: number, target: Point): 
 
 const AI_TUNING: Record<Difficulty, { shoot: number; pass: number; tackle: number; passMin: number; smart: boolean }> = {
   easy: { shoot: 0.48, pass: 0.32, tackle: 0.55, passMin: 0.58, smart: false },
-  normal: { shoot: 0.39, pass: 0.68, tackle: 0.78, passMin: 0.48, smart: true },
+  normal: { shoot: 0.46, pass: 0.54, tackle: 0.62, passMin: 0.55, smart: false },
   hard: { shoot: 0.32, pass: 0.82, tackle: 0.92, passMin: 0.58, smart: true },
 };
 
