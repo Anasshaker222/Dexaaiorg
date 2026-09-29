@@ -13,6 +13,7 @@ import {
   aiChooseAction,
   finishByTime,
   passChance,
+  isOffside,
   goalCenter,
   DIFFICULTY_LABELS,
   type Difficulty,
@@ -85,6 +86,7 @@ function tone(freq: number, dur: number, delay = 0, type: OscillatorType = 'sine
 
 function playSfx(kind: PlayEvent['kind'], mine: boolean) {
   if (kind === 'goal') (mine ? [523, 659, 784, 1047] : [392, 330, 262]).forEach((f, i) => tone(f, 0.25, i * 0.12, 'triangle', 0.09));
+  else if (kind === 'offside') { tone(960, 0.12, 0, 'square', 0.035); tone(760, 0.18, 0.16, 'square', 0.035); }
   else if (kind === 'miss') tone(180, 0.3, 0, 'sawtooth', 0.05);
   else if (kind === 'pass') tone(440, 0.08, 0, 'triangle');
   else if (kind === 'intercept') tone(220, 0.2, 0, 'square', 0.05);
@@ -378,6 +380,7 @@ export default function FootballTactics() {
     if (!muted) playSfx(p.kind, mine);
     const text =
       p.kind === 'goal' ? (mine ? '⚽ هدف! 🎉' : '⚽ هدف للخصم')
+      : p.kind === 'offside' ? (mine ? '🚩 تسلّل! فقدت الاستحواذ' : '🚩 تسلّل للخصم! استعد الكرة')
       : p.kind === 'intercept' ? (mine ? '✋ تمريرتك انقطعت' : '🛡️ قطعت تمريرة الخصم')
       : p.kind === 'miss' ? (mine ? '🥅 التسديدة ضاعت' : '🧤 الخصم ضيّع التسديدة')
       : p.kind === 'tackleWin' ? (mine ? '💪 استخلاص ناجح' : '😬 الخصم سرق الكرة')
@@ -712,8 +715,9 @@ export default function FootballTactics() {
               passTargets.map((i) => {
                 const a = toView(carrierPos);
                 const b = toView(state.positions[myTeam][i]);
+                const offside = isOffside(state, myTeam, i);
                 return (
-                  <line key={`pl-${i}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#fde047" strokeOpacity={0.35} strokeWidth={0.4} strokeDasharray="1.2 1.2" pointerEvents="none" />
+                  <line key={`pl-${i}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={offside ? '#fb7185' : '#fde047'} strokeOpacity={0.55} strokeWidth={0.4} strokeDasharray="1.2 1.2" pointerEvents="none" />
                 );
               })}
 
@@ -724,6 +728,7 @@ export default function FootballTactics() {
                 const mine = t === myTeam;
                 const isSel = mine && selected === i;
                 const isPassTarget = mine && passActive && passTargets.includes(i);
+                const offsideTarget = isPassTarget && isOffside(state, myTeam, i);
                 const isTackler = mine && tackleList.includes(i) && !passActive;
                 const stroke = isSel ? '#ffffff' : mine && equippedItem ? equippedItem.color : 'rgba(255,255,255,0.35)';
                 const strokeW = isSel ? 1.1 : mine && equippedItem ? 1.2 : 0.5;
@@ -732,10 +737,10 @@ export default function FootballTactics() {
                     key={`${t}-${i}`}
                     style={{ transform: `translate(${v.x}px, ${v.y}px)`, transition: 'transform 350ms ease' }}
                   >
-                    {isPassTarget && <circle r={R_PLAYER + 1.8} fill="none" stroke="#fde047" strokeWidth={0.7} />}
+                    {isPassTarget && <circle r={R_PLAYER + 1.8} fill="none" stroke={offsideTarget ? '#fb7185' : '#fde047'} strokeWidth={0.7} />}
                     {isPassTarget && (
-                      <text y={-R_PLAYER - 2.6} textAnchor="middle" fontSize={2.8} fontWeight={700} fill="#fde047" style={{ pointerEvents: 'none' }}>
-                        {Math.round(passChance(state, myTeam, i) * 100)}%
+                      <text y={-R_PLAYER - 2.6} textAnchor="middle" fontSize={2.8} fontWeight={700} fill={offsideTarget ? '#fb7185' : '#fde047'} style={{ pointerEvents: 'none' }}>
+                        {offsideTarget ? 'تسلل' : `${Math.round(passChance(state, myTeam, i) * 100)}%`}
                       </text>
                     )}
                     {isTackler && (

@@ -53,7 +53,7 @@ export const NO_BOOST: Boost = { id: null, move: 0, pass: 0, shoot: 0, tackle: 0
 import { TUNING, type Weather } from './tacticsConfig';
 
 export type TeamStats = { passes: number; passesOk: number; shots: number; goals: number; tackles: number; tacklesWon: number; poss: number };
-export type PlayEvent = { id: number; kind: 'goal' | 'miss' | 'pass' | 'intercept' | 'tackleWin' | 'tackleFail'; team: Team };
+export type PlayEvent = { id: number; kind: 'goal' | 'miss' | 'pass' | 'intercept' | 'offside' | 'tackleWin' | 'tackleFail'; team: Team };
 export type Difficulty = 'easy' | 'normal' | 'hard';
 export const DIFFICULTY_LABELS: Record<Difficulty, string> = { easy: 'سهل', normal: 'عادي', hard: 'صعب' };
 
@@ -478,6 +478,24 @@ export function passableTeammates(state: MatchState, team: Team): number[] {
     .filter((i) => i !== state.ballIndex && dist(state.positions[team][i], carrier) <= passRange(state, team));
 }
 
+/** تطبيق قاعدة التسلل على لحظة لعب الكرة باتجاه زميل متقدم. */
+export function isOffside(state: MatchState, team: Team, receiverIndex: number): boolean {
+  if (state.ballOwner !== team) return false;
+  const receiver = state.positions[team][receiverIndex];
+  const ball = state.positions[team][state.ballIndex];
+  if (!receiver || !ball) return false;
+
+  const progress = (p: Point) => team === 'home' ? p.x : PITCH_W - p.x;
+  const receiverProgress = progress(receiver);
+  if (receiverProgress <= PITCH_W / 2 || receiverProgress <= progress(ball)) return false;
+
+  const defenders = state.positions[opp(team)]
+    .map(progress)
+    .sort((a, b) => b - a);
+  const secondLastDefender = defenders[1] ?? 0;
+  return receiverProgress > secondLastDefender;
+}
+
 /** لاعبين فريقك اللي بيقدروا يستخلصوا الكرة (قريبين من حامل الكرة الخصم). */
 export function tacklers(state: MatchState, team: Team): number[] {
   if (state.ballOwner === team) return [];
@@ -515,6 +533,25 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
 
   if (action.type === 'pass') {
     if (!passableTeammates(state, actingTeam).includes(action.toPlayerIndex)) return state;
+    if (isOffside(state, actingTeam, action.toPlayerIndex)) {
+      const receiver = state.positions[actingTeam][action.toPlayerIndex];
+      let stealer = 0;
+      let best = Infinity;
+      state.positions[opp(actingTeam)].forEach((p, i) => {
+        const d = dist(p, receiver);
+        if (d < best) {
+          best = d;
+          stealer = i;
+        }
+      });
+      next.ballOwner = opp(actingTeam);
+      next.ballIndex = stealer;
+      next.ap = 0;
+      next.lastEvent = '🚩 تسلل! الكرة للخصم';
+      next = record(next, actingTeam, 'offside', { passes: 1 });
+      next = autoAdjust(next, { team: opp(actingTeam), index: stealer });
+      return finishIfNeeded(endTurnIfNeeded(next, true));
+    }
     const ok = rnd(next) < passChance(state, actingTeam, action.toPlayerIndex);
     next.ap -= 1;
     if (ok) {
@@ -655,7 +692,7 @@ export function aiChooseAction(state: MatchState, team: Team, level: Difficulty 
 
     const carrierGoalDist = dist(carrier, gc);
     const mates = passableTeammates(state, team).filter(
-      (i) => dist(state.positions[team][i], gc) < carrierGoalDist - 10 && passChance(state, team, i) >= tune.passMin
+      (i) => !isOffside(state, team, i) && dist(state.positions[team][i], gc) < carrierGoalDist - 10 && passChance(state, team, i) >= tune.passMin
     );
     if (mates.length > 0 && Math.random() < tune.pass) {
       const best = mates.reduce((a, b) =>
