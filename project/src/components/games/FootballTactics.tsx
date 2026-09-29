@@ -429,12 +429,8 @@ export default function FootballTactics() {
     setHover(toView({ x: VB.x + ((e.clientX - rect.left) / rect.width) * VB.w, y: VB.y + ((e.clientY - rect.top) / rect.height) * VB.h }));
   }
 
-  function pitchClick(e: ReactMouseEvent<SVGSVGElement>) {
+  function handlePitchPoint(p: Point) {
     if (!isMyTurn) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const vx = VB.x + ((e.clientX - rect.left) / rect.width) * VB.w;
-    const vy = VB.y + ((e.clientY - rect.top) / rect.height) * VB.h;
-    const p = toView({ x: vx, y: vy }); // القلب هو معكوس نفسه
     const mine = state.positions[myTeam];
     setHint('');
 
@@ -475,6 +471,23 @@ export default function FootballTactics() {
       return;
     }
     act({ type: 'move', playerIndex: selected, to });
+  }
+
+  function pitchClick(e: ReactMouseEvent<SVGSVGElement>) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const vx = VB.x + ((e.clientX - rect.left) / rect.width) * VB.w;
+    const vy = VB.y + ((e.clientY - rect.top) / rect.height) * VB.h;
+    handlePitchPoint(toView({ x: vx, y: vy }));
+  }
+
+  function pitchPlayerClick(team: Team, index: number) {
+    if (!isMyTurn || team !== myTeam) return;
+    if (passActive) {
+      if (passTargets.includes(index)) act({ type: 'pass', toPlayerIndex: index });
+      return;
+    }
+    setHint('');
+    setSelected(index === selected ? null : index);
   }
 
   // اختصارات لوحة المفاتيح: S تسديد، P تمرير، T استخلاص، E إنهاء الدور، Esc إلغاء التحديد
@@ -606,7 +619,7 @@ export default function FootballTactics() {
             <button onClick={() => setMuted((m) => !m)} aria-label="الصوت" className="text-gray-400 hover:text-white">
               {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
-            <button onClick={() => setView3d((v) => !v)} className={`text-xs px-2 py-0.5 rounded-md border ${view3d ? "border-cyan-400 text-cyan-300" : "border-slate-600 text-gray-400"}`}>3D</button>
+            <button onClick={() => setView3d((v) => !v)} aria-pressed={view3d} title="تبديل الملعب التكتيكي ثلاثي الأبعاد" className={`text-xs px-2 py-0.5 rounded-md border ${view3d ? "border-cyan-400 text-cyan-300" : "border-slate-600 text-gray-400"}`}>{view3d ? '3D LIVE' : 'عرض 3D'}</button>
             <span title="الطقس">{state.weather === 'wet' ? '🌧️' : state.weather === 'damp' ? '🌦️' : '☀️'}</span>
             <span title="حماس الجمهور" className="w-14 h-1.5 rounded-full bg-slate-700 overflow-hidden">
               <span className="block h-full bg-yellow-400 transition-all" style={{ width: `${state.crowd ?? 20}%` }} />
@@ -626,11 +639,22 @@ export default function FootballTactics() {
           </div>
 
           {/* الملعب */}
-          {view3d && (
+          {view3d ? (
             <Suspense fallback={<div className="text-xs text-gray-400">جاري تحميل الملعب ثلاثي الأبعاد…</div>}>
-              <Pitch3D state={state} myTeam={myTeam} />
+              <Pitch3D
+                state={state}
+                myTeam={myTeam}
+                selected={selected}
+                passActive={passActive}
+                passTargets={passTargets}
+                tackleTargets={tackleList}
+                movementRadius={myMoveRadius}
+                canInteract={isMyTurn}
+                onPlayerClick={pitchPlayerClick}
+                onPitchClick={handlePitchPoint}
+              />
             </Suspense>
-          )}
+          ) : (
           <svg
             viewBox={`${VB.x} ${VB.y} ${VB.w} ${VB.h}`}
             onClick={pitchClick}
@@ -777,6 +801,7 @@ export default function FootballTactics() {
               );
             })()}
           </svg>
+          )}
 
           <section aria-label="دليل اللعب" className="w-full max-w-[560px] rounded-xl border border-emerald-400/15 bg-slate-950/45 px-3 py-2.5">
             <div className="mb-2 flex items-center justify-between gap-2">
