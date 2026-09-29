@@ -87,6 +87,8 @@ function tone(freq: number, dur: number, delay = 0, type: OscillatorType = 'sine
 function playSfx(kind: PlayEvent['kind'], mine: boolean) {
   if (kind === 'goal') (mine ? [523, 659, 784, 1047] : [392, 330, 262]).forEach((f, i) => tone(f, 0.25, i * 0.12, 'triangle', 0.09));
   else if (kind === 'offside') { tone(960, 0.12, 0, 'square', 0.035); tone(760, 0.18, 0.16, 'square', 0.035); }
+  else if (kind === 'save') { tone(520, 0.1, 0, 'triangle', 0.06); tone(260, 0.16, 0.1, 'triangle', 0.05); }
+  else if (kind === 'rebound') tone(620, 0.16, 0, 'triangle', 0.06);
   else if (kind === 'miss') tone(180, 0.3, 0, 'sawtooth', 0.05);
   else if (kind === 'pass') tone(440, 0.08, 0, 'triangle');
   else if (kind === 'intercept') tone(220, 0.2, 0, 'square', 0.05);
@@ -381,6 +383,8 @@ export default function FootballTactics() {
     const text =
       p.kind === 'goal' ? (mine ? '⚽ هدف! 🎉' : '⚽ هدف للخصم')
       : p.kind === 'offside' ? (mine ? '🚩 تسلّل! فقدت الاستحواذ' : '🚩 تسلّل للخصم! استعد الكرة')
+      : p.kind === 'save' ? (mine ? '🧤 الحارس تصدّى لتسديدتك' : '🧤 حارسك تصدّى للتسديدة')
+      : p.kind === 'rebound' ? '⚡ تصدٍّ! الكرة المرتدة متاحة'
       : p.kind === 'intercept' ? (mine ? '✋ تمريرتك انقطعت' : '🛡️ قطعت تمريرة الخصم')
       : p.kind === 'miss' ? (mine ? '🥅 التسديدة ضاعت' : '🧤 الخصم ضيّع التسديدة')
       : p.kind === 'tackleWin' ? (mine ? '💪 استخلاص ناجح' : '😬 الخصم سرق الكرة')
@@ -905,6 +909,7 @@ export default function FootballTactics() {
                     [`${a.passesOk}/${a.passes}`, 'تمريرات ناجحة', `${b.passesOk}/${b.passes}`],
                     [`${pa}%`, 'استحواذ', `${100 - pa}%`],
                     [`${a.shots}`, 'تسديدات', `${b.shots}`],
+                    [`${a.saves ?? 0}`, 'تصديات الحارس', `${b.saves ?? 0}`],
                     [`${a.tacklesWon}/${a.tackles}`, 'استخلاصات', `${b.tacklesWon}/${b.tackles}`],
                   ];
                   return (

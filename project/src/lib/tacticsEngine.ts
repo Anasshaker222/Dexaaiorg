@@ -52,12 +52,12 @@ export const NO_BOOST: Boost = { id: null, move: 0, pass: 0, shoot: 0, tackle: 0
 
 import { TUNING, type Weather } from './tacticsConfig';
 
-export type TeamStats = { passes: number; passesOk: number; shots: number; goals: number; tackles: number; tacklesWon: number; poss: number };
-export type PlayEvent = { id: number; kind: 'goal' | 'miss' | 'pass' | 'intercept' | 'offside' | 'tackleWin' | 'tackleFail'; team: Team };
+export type TeamStats = { passes: number; passesOk: number; shots: number; goals: number; tackles: number; tacklesWon: number; saves: number; poss: number };
+export type PlayEvent = { id: number; kind: 'goal' | 'miss' | 'save' | 'rebound' | 'pass' | 'intercept' | 'offside' | 'tackleWin' | 'tackleFail'; team: Team };
 export type Difficulty = 'easy' | 'normal' | 'hard';
 export const DIFFICULTY_LABELS: Record<Difficulty, string> = { easy: 'سهل', normal: 'عادي', hard: 'صعب' };
 
-const EMPTY_STATS: TeamStats = { passes: 0, passesOk: 0, shots: 0, goals: 0, tackles: 0, tacklesWon: 0, poss: 0 };
+const EMPTY_STATS: TeamStats = { passes: 0, passesOk: 0, shots: 0, goals: 0, tackles: 0, tacklesWon: 0, saves: 0, poss: 0 };
 
 export type MatchState = {
   positions: Record<Team, Point[]>; // 11 لاعب بكل فريق
@@ -128,7 +128,7 @@ export function goalCenter(team: Team): Point {
 }
 
 function inGoalMouth(team: Team, p: Point): boolean {
-  const onLine = team === 'home' ? p.x >= PITCH_W - GOAL_DEPTH : p.x <= GOAL_DEPTH;
+  const onLine = team === 'home' ? p.x >= PITCH_W - 0.5 : p.x <= 0.5;
   return onLine && Math.abs(p.y - PITCH_H / 2) <= GOAL_HALF;
 }
 
@@ -324,9 +324,16 @@ export function passRange(state: MatchState, team: Team): number {
 
 /** احتمال نجاح استخلاص الفريق للكرة (مع بطاقته وبطاقة حامل الكرة). */
 export function tackleChance(state: MatchState, team: Team, playerIndex?: number): number {
+  // التوقيت والمسافة مهمين: الالتحام القريب أسهل من مد الرجل من آخر مدى الاستخلاص.
+  const opponent = opp(team);
+  const carrier = state.positions[opponent][state.ballIndex];
+  const tackler = playerIndex === undefined ? undefined : state.positions[team][playerIndex];
+  const distanceBonus = carrier && tackler
+    ? clamp((TACKLE_RANGE - dist(tackler, carrier)) / TACKLE_RANGE, 0, 1) * 0.18
+    : 0;
   // المدافعين أقوى بالاستخلاص (+8%)
   const roleBonus = playerIndex !== undefined && roleOf(state, team, playerIndex) === 'def' ? 0.08 : 0;
-  return clamp(0.5 + roleBonus + boostOf(state, team).tackle - boostOf(state, opp(team)).guard, 0.2, 0.88);
+  return clamp(0.44 + distanceBonus + roleBonus + boostOf(state, team).tackle - boostOf(state, opponent).guard, 0.2, 0.88);
 }
 
 export function initialState(
@@ -418,7 +425,10 @@ export function isValidMove(state: MatchState, team: Team, playerIndex: number, 
   const d = dist(from, to);
   if (d > moveRadius(state, team) + 1e-6 || d < 1) return false;
   const scoring = state.ballOwner === team && state.ballIndex === playerIndex && inGoalMouth(team, to);
-  if (scoring) return true;
+  if (scoring) {
+    // لا يمكن حمل الكرة عبر الحارس أو المدافع لتسجيل هدف بالحركة.
+    return state.positions[opp(team)].every((p) => distToSegment(p, from, to) >= MIN_SEP * 0.75);
+  }
   for (const t of ['home', 'away'] as Team[]) {
     for (let i = 0; i < state.positions[t].length; i++) {
       if (t === team && i === playerIndex) continue;
@@ -459,6 +469,17 @@ export function shootChance(state: MatchState, team: Team): number {
   const gkOut = dist(state.positions[opp(team)][0], state.positions[team][state.ballIndex]) < TUNING.gkSweepDist ? TUNING.gkSweepPenalty : 0;
   chance += boostOf(state, team).shoot + roleBonus - gkOut - 0.12 * near - 0.1 * blockers;
   return clamp(chance, 0.05, 0.8);
+}
+
+/** فرصة تصدي الحارس للتسديدة التي لم تدخل، بحسب تمركزه على خط الكرة والمرمى. */
+function goalkeeperSaveChance(state: MatchState, team: Team): number {
+  const shooter = state.positions[team][state.ballIndex];
+  const goal = goalCenter(team);
+  const keeper = state.positions[opp(team)][0];
+  if (!shooter || !keeper) return 0.35;
+  const lineGap = distToSegment(keeper, shooter, goal);
+  const goalDistance = dist(keeper, goal);
+  return clamp(0.54 - lineGap * 0.035 + (14 - goalDistance) * 0.008, 0.12, 0.72);
 }
 
 /** احتمال نجاح التمريرة: بتنقص مع المسافة ومع كل مدافع واقف بخط التمريرة. */
@@ -592,22 +613,48 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
       next = resetAfterGoal(next, actingTeam);
       return finishIfNeeded(next);
     }
-    next.lastEvent = 'تسديدة ضاعت! الكرة رجعت للدفاع';
-    next = record(next, actingTeam, 'miss', { shots: 1 });
-    next.ballOwner = opp(actingTeam);
-    const gc = goalCenter(actingTeam);
-    let closestIdx = 0;
-    let bestD = Infinity;
-    next.positions[opp(actingTeam)].forEach((p, i) => {
-      const d = dist(p, gc);
-      if (d < bestD) {
-        bestD = d;
-        closestIdx = i;
+    const saved = rnd(next) < goalkeeperSaveChance(state, actingTeam);
+    if (saved) {
+      const rebound = rnd(next) < TUNING.shotReboundOdds;
+      next.lastEvent = rebound ? '🧤 الحارس تصدّى! الكرة المرتدة في الملعب' : '🧤 الحارس تصدّى للتسديدة';
+      next = record(next, actingTeam, rebound ? 'rebound' : 'save', { shots: 1 });
+      const keeperStats = next.stats ?? { home: { ...EMPTY_STATS }, away: { ...EMPTY_STATS } };
+      const defendingTeam = opp(actingTeam);
+      next.stats = {
+        ...keeperStats,
+        [defendingTeam]: { ...keeperStats[defendingTeam], saves: (keeperStats[defendingTeam].saves ?? 0) + 1 },
+      };
+      if (rebound) {
+        const landing = { x: goalCenter(actingTeam).x + (actingTeam === 'home' ? -5 : 5), y: state.positions[actingTeam][state.ballIndex].y };
+        let closestTeam: Team = actingTeam;
+        let closestIndex = 0;
+        let bestDistance = Infinity;
+        (['home', 'away'] as Team[]).forEach((candidateTeam) => {
+          next.positions[candidateTeam].forEach((p, i) => {
+            const d = dist(p, landing);
+            if (d < bestDistance) {
+              bestDistance = d;
+              closestTeam = candidateTeam;
+              closestIndex = i;
+            }
+          });
+        });
+        next.ballOwner = closestTeam;
+        next.ballIndex = closestIndex;
+        next = autoAdjust(next, { team: closestTeam, index: closestIndex });
+      } else {
+        next.ballOwner = opp(actingTeam);
+        next.ballIndex = 0;
+        next = autoAdjust(next, { team: opp(actingTeam), index: 0 });
       }
-    });
-    next.ballIndex = closestIdx;
+    } else {
+      next.lastEvent = 'تسديدة خارج المرمى! ركلة مرمى';
+      next = record(next, actingTeam, 'miss', { shots: 1 });
+      next.ballOwner = opp(actingTeam);
+      next.ballIndex = 0;
+      next = autoAdjust(next, { team: opp(actingTeam), index: 0 });
+    }
     next.ap = 0;
-    next = autoAdjust(next, { team: opp(actingTeam), index: closestIdx });
     return finishIfNeeded(endTurnIfNeeded(next, true));
   }
 
@@ -653,9 +700,9 @@ function stepToward(state: MatchState, team: Team, idx: number, target: Point): 
 }
 
 const AI_TUNING: Record<Difficulty, { shoot: number; pass: number; tackle: number; passMin: number; smart: boolean }> = {
-  easy: { shoot: 0.45, pass: 0.2, tackle: 0.6, passMin: 0.5, smart: false },
-  normal: { shoot: 0.33, pass: 0.35, tackle: 1, passMin: 0.5, smart: false },
-  hard: { shoot: 0.27, pass: 0.6, tackle: 1, passMin: 0.6, smart: true },
+  easy: { shoot: 0.48, pass: 0.32, tackle: 0.55, passMin: 0.58, smart: false },
+  normal: { shoot: 0.39, pass: 0.68, tackle: 0.78, passMin: 0.48, smart: true },
+  hard: { shoot: 0.32, pass: 0.82, tackle: 0.92, passMin: 0.58, smart: true },
 };
 
 /** المراوغة الذكية: بيجرّب 24 اتجاه، وبيختار الأقرب للمرمى مع الابتعاد عن المدافعين. */
@@ -682,6 +729,7 @@ function bestDribble(state: MatchState, team: Team, idx: number, target: Point):
 /** ذكاء اصطناعي بيختار حركة وحدة لما يكون دور الجهاز، بثلاث مستويات صعوبة (لوضع اللعب المحلي). */
 export function aiChooseAction(state: MatchState, team: Team, level: Difficulty = 'normal'): Action {
   const base = AI_TUNING[level];
+  const decisionRoll = rnd({ ...state });
   // الطبقة الاستراتيجية: لو الجهاز متأخر بيهاجم أكثر، ولو متقدم بيلعب أهدى
   const diff = state.score[team] - state.score[opp(team)];
   const tune = { ...base, shoot: base.shoot - (diff < 0 ? 0.05 : 0), pass: clamp(base.pass + (diff < 0 ? 0.1 : diff > 0 ? -0.1 : 0), 0, 1) };
@@ -692,13 +740,28 @@ export function aiChooseAction(state: MatchState, team: Team, level: Difficulty 
 
     const carrierGoalDist = dist(carrier, gc);
     const mates = passableTeammates(state, team).filter(
-      (i) => !isOffside(state, team, i) && dist(state.positions[team][i], gc) < carrierGoalDist - 10 && passChance(state, team, i) >= tune.passMin
+      (i) => !isOffside(state, team, i) && passChance(state, team, i) >= tune.passMin
     );
-    if (mates.length > 0 && Math.random() < tune.pass) {
-      const best = mates.reduce((a, b) =>
-        dist(state.positions[team][a], gc) < dist(state.positions[team][b], gc) ? a : b
-      );
-      return { type: 'pass', toPlayerIndex: best };
+    if (mates.length > 0) {
+      const best = mates.reduce((a, b) => {
+        const score = (i: number) => {
+          const receiver = state.positions[team][i];
+          const forwardGain = team === 'home' ? receiver.x - carrier.x : carrier.x - receiver.x;
+          const goalGain = carrierGoalDist - dist(receiver, gc);
+          const clearance = Math.min(...state.positions[opp(team)].map((p) => dist(p, receiver)));
+          return forwardGain * 0.28 + goalGain * 0.24 + passChance(state, team, i) * 18 + Math.min(clearance, 16) * 0.22;
+        };
+        return score(b) > score(a) ? b : a;
+      });
+      const receiver = state.positions[team][best];
+      const forwardGain = team === 'home' ? receiver.x - carrier.x : carrier.x - receiver.x;
+      const pressure = Math.min(...state.positions[opp(team)].map((p) => dist(p, carrier)));
+      const projectedShot = shootChance({ ...state, ballIndex: best }, team);
+      const betterChance = projectedShot >= shootChance(state, team) + 0.12;
+      const passMakesSense = forwardGain >= 7 || (pressure <= 12 && forwardGain >= -5) || betterChance;
+      if (passMakesSense && decisionRoll < tune.pass) {
+        return { type: 'pass', toPlayerIndex: best };
+      }
     }
     const target = { x: gc.x, y: clamp(carrier.y, PITCH_H / 2 - GOAL_HALF, PITCH_H / 2 + GOAL_HALF) };
     const far = dist(carrier, target) > moveRadius(state, team);
@@ -709,11 +772,9 @@ export function aiChooseAction(state: MatchState, team: Team, level: Difficulty 
 
   const mine = tacklers(state, team);
   const enemyCarrier = state.positions[opp(team)][state.ballIndex];
-  if (mine.length > 0 && Math.random() < tune.tackle) {
-    const closest = mine.reduce((a, b) =>
-      dist(state.positions[team][a], enemyCarrier) < dist(state.positions[team][b], enemyCarrier) ? a : b
-    );
-    return { type: 'tackle', playerIndex: closest };
+  if (mine.length > 0 && decisionRoll < tune.tackle) {
+    const bestTackler = mine.reduce((a, b) => tackleChance(state, team, b) > tackleChance(state, team, a) ? b : a);
+    if (tackleChance(state, team, bestTackler) >= 0.4) return { type: 'tackle', playerIndex: bestTackler };
   }
   // قرّب أقرب لاعب (غير الحارس) من حامل الكرة الخصم لحد ما يصير بمدى الاستخلاص
   let bestIdx = 1;
