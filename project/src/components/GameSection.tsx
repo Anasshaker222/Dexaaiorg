@@ -17,7 +17,7 @@ const GAMES: GameMeta[] = [
   {
     id: 'tactics',
     title: 'Football Tactics',
-    description: 'Turn-based tactical football. Move, pass, shoot and tackle — play a training match vs AI or challenge a real opponent online.',
+    description: 'Real-time tactical football. Attack with the ball, defend without it, and play training matches vs AI or challenge a real opponent online.',
     icon: Swords,
     color: 'green',
     tag: 'Multiplayer',

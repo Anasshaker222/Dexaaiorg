@@ -16,11 +16,13 @@ import { db, ensureSignedIn } from './firebase';
 import {
   initialState,
   applyAction,
+  applyLiveAction,
   finishByTime,
   DEFAULT_FORMATION,
   MATCH_DURATION_MS,
   TURN_TIME_MS,
   type MatchState,
+  type Action,
   type Team,
   type Boost,
   type FormationId,
@@ -194,6 +196,23 @@ export async function pushMatchState(matchId: string, state: MatchState) {
     state,
     updatedAt: serverTimestamp(),
     turnStartedAt: serverTimestamp(),
+  });
+}
+
+/** Applies each live action to the latest shared state so simultaneous players cannot overwrite one another. */
+export async function pushLiveAction(matchId: string, role: Team, action: Action): Promise<MatchState | null> {
+  if (!db) return null;
+  const firestore = db;
+  return runTransaction(firestore, async (tx) => {
+    const ref = doc(firestore, 'tacticsMatches', matchId);
+    const snap = await tx.get(ref);
+    if (!snap.exists()) return null;
+    const data = snap.data() as MatchDoc;
+    if (data.state.status !== 'playing') return null;
+    const next = applyLiveAction(data.state, action, role);
+    if (next === data.state) return null;
+    tx.update(ref, { state: next, updatedAt: serverTimestamp(), turnStartedAt: serverTimestamp() });
+    return next;
   });
 }
 

@@ -393,7 +393,7 @@ export default function Pitch3D({ state, myTeam, selected, passActive, passTarge
   return (
     <div ref={host} className={`group relative w-full aspect-video rounded-2xl overflow-hidden border border-cyan-400/25 shadow-[0_0_32px_rgba(34,211,238,0.08)] ${canInteract ? 'cursor-crosshair' : ''}`}>
       <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-lg border border-white/10 bg-slate-950/65 px-2.5 py-1.5 text-[10px] text-cyan-100 backdrop-blur-sm">
-        ملعب ثلاثي الأبعاد · {canInteract ? 'انقر لاعبًا أو نقطة على العشب للتحكم' : 'دور الخصم'}
+        ملعب ثلاثي الأبعاد · {canInteract ? 'انقر لاعبًا أو نقطة على العشب للتحكم' : 'المباراة انتهت'}
       </div>
       <div className="pointer-events-none absolute bottom-3 right-3 z-10 rounded-lg bg-slate-950/60 px-2 py-1 text-[10px] text-white/75 backdrop-blur-sm">
         {state.weather === 'wet' ? '🌧️ ملعب ممطر' : state.weather === 'damp' ? '🌦️ عشب رطب' : '☀️ أجواء صافية'} · الجمهور {Math.round(state.crowd ?? 20)}%

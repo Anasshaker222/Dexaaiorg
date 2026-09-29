@@ -24,6 +24,7 @@ export const AUTO_STEP = 4; // أقصى مسافة بيتحركها اللاعب
 // وما بيعرف الوقت الحقيقي)، بس القيم مركزية هون حتى تنقرا بمكان وحد.
 export const MATCH_DURATION_MS = 8 * 60 * 1000; // مدة المباراة: 8 دقائق. لو خلص الوقت، الفوز للي قدام بالنتيجة
 export const TURN_TIME_MS = 20 * 1000; // كل ما توصلك الكرة أو يصير دورك، عندك 20 ثانية تلعب فيها، وإلا بتروح الكرة للطرف التاني
+export const LIVE_MOVE_RADIUS = 4.8; // حركة قصيرة في المباراة الحية لتقريب سرعة اللاعب من الركض الواقعي
 
 export type Team = 'home' | 'away';
 export type Point = { x: number; y: number };
@@ -317,6 +318,11 @@ export function moveRadius(state: MatchState, team: Team): number {
   return MOVE_RADIUS + boostOf(state, team).move;
 }
 
+/** Short sprint distance used by continuous matches instead of turn-based movement. */
+export function liveMoveRadius(state: MatchState, team: Team): number {
+  return LIVE_MOVE_RADIUS + boostOf(state, team).move * 0.25;
+}
+
 /** مدى تمرير الفريق (مع البطاقة). */
 export function passRange(state: MatchState, team: Team): number {
   return PASS_RANGE + boostOf(state, team).pass;
@@ -423,7 +429,7 @@ export function isValidMove(state: MatchState, team: Team, playerIndex: number, 
   if (!from) return false;
   if (!(to.x >= 0 && to.x <= PITCH_W && to.y >= 0 && to.y <= PITCH_H)) return false;
   const d = dist(from, to);
-  if (d > moveRadius(state, team) + 1e-6 || d < 1) return false;
+  if (d > liveMoveRadius(state, team) + 1e-6 || d < 1) return false;
   const scoring = state.ballOwner === team && state.ballIndex === playerIndex && inGoalMouth(team, to);
   if (scoring) {
     // لا يمكن حمل الكرة عبر الحارس أو المدافع لتسجيل هدف بالحركة.
@@ -677,6 +683,31 @@ export function applyAction(state: MatchState, action: Action, actingTeam: Team)
   return state;
 }
 
+/** يطبّق فعلًا أثناء المباراة الحية: أي فريق يقدر يتحرك، والكرة تحدد من يهاجم ومن يدافع. */
+export function applyLiveAction(state: MatchState, action: Action, actingTeam: Team): MatchState {
+  if (state.status === 'finished' || action.type === 'endTurn') return state;
+  let liveAction = action;
+  if (action.type === 'move') {
+    const from = state.positions[actingTeam][action.playerIndex];
+    if (!from) return state;
+    const radius = LIVE_MOVE_RADIUS + boostOf(state, actingTeam).move * 0.25;
+    const distance = dist(from, action.to);
+    if (distance > radius) {
+      const scale = radius / distance;
+      liveAction = {
+        ...action,
+        to: { x: from.x + (action.to.x - from.x) * scale, y: from.y + (action.to.y - from.y) * scale },
+      };
+    }
+  }
+
+  // Spare AP avoids forcing alternating turns in the legacy action resolver.
+  const ready = { ...state, turn: actingTeam, ap: AP_PER_TURN + 1 };
+  const next = applyAction(ready, liveAction, actingTeam);
+  if (next === ready) return state;
+  return { ...next, turn: next.ballOwner, ap: AP_PER_TURN };
+}
+
 // ---------- الذكاء الاصطناعي (وضع اللعب المحلي) ----------
 
 /** بيحاول يحرّك لاعب باتجاه هدف، وبيجرّب زوايا ومسافات مختلفة لحد ما يلاقي مكان صالح. */
@@ -685,7 +716,7 @@ function stepToward(state: MatchState, team: Team, idx: number, target: Point): 
   const d = dist(from, target);
   if (d < 1) return null;
   const baseAngle = Math.atan2(target.y - from.y, target.x - from.x);
-  const step = Math.min(moveRadius(state, team), d);
+  const step = Math.min(liveMoveRadius(state, team), d);
   for (const scale of [1, 0.75, 0.5]) {
     for (const off of [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2]) {
       const a = baseAngle + off;
@@ -708,7 +739,7 @@ const AI_TUNING: Record<Difficulty, { shoot: number; pass: number; tackle: numbe
 /** المراوغة الذكية: بيجرّب 24 اتجاه، وبيختار الأقرب للمرمى مع الابتعاد عن المدافعين. */
 function bestDribble(state: MatchState, team: Team, idx: number, target: Point): Point | null {
   const from = state.positions[team][idx];
-  const R = moveRadius(state, team);
+  const R = liveMoveRadius(state, team);
   const enemies = state.positions[opp(team)];
   let best: Point | null = null;
   let bestScore = -Infinity;
@@ -764,7 +795,7 @@ export function aiChooseAction(state: MatchState, team: Team, level: Difficulty 
       }
     }
     const target = { x: gc.x, y: clamp(carrier.y, PITCH_H / 2 - GOAL_HALF, PITCH_H / 2 + GOAL_HALF) };
-    const far = dist(carrier, target) > moveRadius(state, team);
+    const far = dist(carrier, target) > liveMoveRadius(state, team);
     const to = (tune.smart && far ? bestDribble(state, team, state.ballIndex, target) : null) ?? stepToward(state, team, state.ballIndex, target);
     if (to) return { type: 'move', playerIndex: state.ballIndex, to };
     return { type: 'endTurn' };

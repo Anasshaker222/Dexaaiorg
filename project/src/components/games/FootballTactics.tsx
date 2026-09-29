@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { Swords, Users, Bot, Loader2, Trophy, RotateCcw, X, Crosshair, Footprints, Shield, Send, Hand, Volume2, VolumeX } from 'lucide-react';
+import { Swords, Users, Bot, Loader2, Trophy, RotateCcw, X, Crosshair, Shield, Send, Hand, Volume2, VolumeX } from 'lucide-react';
 import {
-  applyAction,
+  applyLiveAction,
   initialState,
   isValidMove,
   passableTeammates,
@@ -9,7 +9,7 @@ import {
   inShootRange,
   shootChance,
   tackleChance,
-  moveRadius,
+  liveMoveRadius,
   aiChooseAction,
   finishByTime,
   passChance,
@@ -25,7 +25,6 @@ import {
   GOAL_DEPTH,
   R_PLAYER,
   MATCH_DURATION_MS,
-  TURN_TIME_MS,
   FORMATION_IDS,
   FORMATION_LABELS,
   DEFAULT_FORMATION,
@@ -40,13 +39,12 @@ import {
   findOrCreateMatch,
   cancelSearch,
   subscribeMatch,
-  pushMatchState,
+  pushLiveAction,
   resetMatch,
   leaveMatch,
   touchPresence,
   claimForfeitByTimeout,
   claimFinishByTime,
-  claimStalledTurn,
   type MatchDoc,
 } from '../../lib/matchmaking';
 import { recordResult, getMyRank, type PlayerRank, type MatchReward } from '../../lib/ranking';
@@ -116,6 +114,8 @@ export default function FootballTactics() {
   const [name, setName] = useState('');
   const [formationChoice, setFormationChoice] = useState<FormationId>(DEFAULT_FORMATION);
   const [state, setState] = useState<MatchState>(() => initialState());
+  const liveStateRef = useRef(state);
+  liveStateRef.current = state;
   const [selected, setSelected] = useState<number | null>(null);
   const [passMode, setPassMode] = useState(false);
   const [error, setError] = useState('');
@@ -136,12 +136,11 @@ export default function FootballTactics() {
   const [abandonedBy, setAbandonedBy] = useState<Team | null>(null);
   const rematchLoggedRef = useRef(false);
 
-  // توقيت المباراة (مدة كلية) والدور (لكل حركة) - محلي للعرض ولإنهاء الدور/المباراة تلقائيًا
-  // بوضع اللعب المحلي. بوضع الأونلاين القيم جايّة من فايرستور (startedAt/turnStartedAt).
+  // المباراة الحية تستخدم ساعة مباراة واحدة؛ الاستحواذ يحدد من يهاجم ومن يدافع.
   const [boostCards, setBoostCards] = useState<Record<Team, PlayerCard | null> | null>(null);
   const [matchStartedAt, setMatchStartedAt] = useState<number | null>(null);
-  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
+  const lastLiveMoveAt = useRef(0);
 
   useEffect(() => {
     if (mode === 'menu' && firebaseEnabled) {
@@ -156,31 +155,26 @@ export default function FootballTactics() {
     return () => clearInterval(t);
   }, [mode, state.status]);
 
-  // AI turn (local mode only)
+  // The local AI acts on a steady clock, attacking with possession and pressing when defending.
   useEffect(() => {
-    if (mode !== 'local' || state.status !== 'playing' || state.turn !== 'away') return;
-    const t = setTimeout(() => {
-      const action = aiChooseAction(state, 'away', difficulty);
-      setState((s) => applyAction(s, action, 'away'));
-      setSelected(null);
-      setTurnStartedAt(Date.now());
-    }, 650);
-    return () => clearTimeout(t);
-  }, [mode, state, difficulty]);
+    if (mode !== 'local' || state.status !== 'playing') return;
+    const timer = setInterval(() => {
+      const current = liveStateRef.current;
+      if (current.status !== 'playing') return;
+      const action = aiChooseAction(current, 'away', difficulty);
+      setState((s) => applyLiveAction(s, action, 'away'));
+    }, 850);
+    return () => clearInterval(timer);
+  }, [mode, state.status, difficulty]);
 
-  // وضع محلي: إنهاء الدور تلقائيًا لو خلص وقت الدور، وإنهاء المباراة تلقائيًا لو خلص وقتها الكلي
+  // End the local match when its match clock expires; there is no per-turn timer.
   useEffect(() => {
     if (mode !== 'local' || state.status !== 'playing') return;
     if (matchStartedAt !== null && nowTick - matchStartedAt >= MATCH_DURATION_MS) {
       setState((s) => finishByTime(s));
       return;
     }
-    if (state.turn === 'home' && turnStartedAt !== null && nowTick - turnStartedAt >= TURN_TIME_MS) {
-      setState((s) => applyAction(s, { type: 'endTurn' }, 'home'));
-      setSelected(null);
-      setTurnStartedAt(Date.now());
-    }
-  }, [mode, state.status, state.turn, nowTick, matchStartedAt, turnStartedAt]);
+  }, [mode, state.status, nowTick, matchStartedAt]);
 
   // online sync
   useEffect(() => {
@@ -192,7 +186,6 @@ export default function FootballTactics() {
       setAbandonedBy(m.abandonedBy ?? null);
       setBoostCards(m.boostCards ?? null);
       setMatchStartedAt(m.startedAt?.toMillis?.() ?? null);
-      setTurnStartedAt(m.turnStartedAt?.toMillis?.() ?? null);
     });
     return unsub;
   }, [mode, matchId, role]);
@@ -222,16 +215,6 @@ export default function FootballTactics() {
     }, 5000);
     return () => clearInterval(t);
   }, [mode, matchId, state.status]);
-
-  // مراقبة وقت الدور أونلاين: لو صاحب الدور ما لعب خلال TURN_TIME_MS، أي طرف بيقدر يمرّر
-  // الدور جبرًا للطرف التاني (عدالة أكبر من انتظار انسحاب كامل).
-  useEffect(() => {
-    if (mode !== 'online' || !matchId || state.status !== 'playing') return;
-    const t = setInterval(() => {
-      claimStalledTurn(matchId, state.turn).catch(() => {});
-    }, 3000);
-    return () => clearInterval(t);
-  }, [mode, matchId, state.status, state.turn]);
 
   // انسحاب صريح: لو المستخدم سكّر التبويب أو غادر الصفحة ومباراته لسا شغالة
   useEffect(() => {
@@ -289,7 +272,6 @@ export default function FootballTactics() {
     setAbandonedBy(null);
     setBoostCards(null);
     setMatchStartedAt(null);
-    setTurnStartedAt(null);
     rematchLoggedRef.current = false;
   }
 
@@ -307,7 +289,6 @@ export default function FootballTactics() {
     setBoostCards({ home: myBoostCard(), away: null });
     const t = Date.now();
     setMatchStartedAt(t);
-    setTurnStartedAt(t);
     setSelected(null);
     setPassMode(false);
     setHint('');
@@ -347,9 +328,9 @@ export default function FootballTactics() {
   const flip = mode === 'online' && role === 'away';
   const toView = (p: Point): Point => (flip ? { x: PITCH_W - p.x, y: PITCH_H - p.y } : p);
 
-  const isMyTurn = state.status === 'playing' && state.turn === myTeam && (mode === 'local' ? myTeam === 'home' : true);
+  const isMyTurn = state.status === 'playing';
   const carrierPos = state.positions[state.ballOwner][state.ballIndex];
-  const myMoveRadius = moveRadius(state, myTeam);
+  const myMoveRadius = liveMoveRadius(state, myTeam);
 
   const passTargets = isMyTurn ? passableTeammates(state, myTeam) : [];
   const tackleList = isMyTurn ? tacklers(state, myTeam) : [];
@@ -396,19 +377,27 @@ export default function FootballTactics() {
   }, [playId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const matchRemainingMs = matchStartedAt !== null ? Math.max(0, MATCH_DURATION_MS - (nowTick - matchStartedAt)) : MATCH_DURATION_MS;
-  const turnRemainingMs = turnStartedAt !== null ? Math.max(0, TURN_TIME_MS - (nowTick - turnStartedAt)) : TURN_TIME_MS;
-
   function act(action: Action) {
-    const next = applyAction(state, action, myTeam);
-    if (next === state) return;
-    setState(next);
-    if (mode === 'online' && matchId) pushMatchState(matchId, next);
-    else if (mode === 'local') setTurnStartedAt(Date.now());
+    if (action.type === 'move') {
+      const now = Date.now();
+      if (now - lastLiveMoveAt.current < 450) return;
+      lastLiveMoveAt.current = now;
+    }
+    if (mode === 'online' && matchId) {
+      pushLiveAction(matchId, myTeam, action).catch((cause) => {
+        console.error('[live-match-action]', cause);
+        setError('تعذّر تحديث المباراة الحية. تحقق من الاتصال وحاول مجددًا.');
+      });
+    } else {
+      const next = applyLiveAction(state, action, myTeam);
+      if (next === state) return;
+      setState(next);
+    }
     setPassMode(false);
     setHint('');
     setHover(null);
     // بعد الحركة بنخلي اللاعب محدّد عشان تقدر تحركه مرة ثانية، إلا إذا خلص الدور
-    if (action.type !== 'move' || next.turn !== myTeam || next.status === 'finished') setSelected(null);
+    if (action.type !== 'move' || state.ballOwner !== myTeam || state.status === 'finished') setSelected(null);
   }
 
   function doTackle() {
@@ -494,7 +483,7 @@ export default function FootballTactics() {
     setSelected(index === selected ? null : index);
   }
 
-  // اختصارات لوحة المفاتيح: S تسديد، P تمرير، T استخلاص، E إنهاء الدور، Esc إلغاء التحديد
+  // اختصارات المباراة الحية: S تسديد، P تمرير، T استخلاص، Esc إلغاء التحديد
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -503,7 +492,6 @@ export default function FootballTactics() {
       if (k === 's' && canShoot) act({ type: 'shoot' });
       else if (k === 'p' && passTargets.length > 0) setPassMode((v) => !v);
       else if (k === 't') doTackle();
-      else if (k === 'e') act({ type: 'endTurn' });
       else if (k === 'escape') {
         setSelected(null);
         setPassMode(false);
@@ -629,17 +617,9 @@ export default function FootballTactics() {
               <span className="block h-full bg-yellow-400 transition-all" style={{ width: `${state.crowd ?? 20}%` }} />
             </span>
             <span>•</span>
-            <span className={isMyTurn ? 'text-emerald-400 font-bold' : ''}>{isMyTurn ? 'دورك الآن' : 'دور الخصم'}</span>
-            <span>•</span>
-            <span>نقاط الحركة: {state.ap}</span>
-            {state.status === 'playing' && (
-              <>
-                <span>•</span>
-                <span className={turnRemainingMs <= 5000 ? 'text-red-400 font-bold' : ''}>
-                  ⏳ {Math.ceil(turnRemainingMs / 1000)}ث {isMyTurn ? 'لدورك' : 'للخصم'}
-                </span>
-              </>
-            )}
+            <span className={state.ballOwner === myTeam ? 'text-emerald-400 font-bold' : 'text-amber-300 font-bold'}>
+              {state.ballOwner === myTeam ? 'هجوم · الكرة مع فريقك' : 'دفاع · استعد الكرة'}
+            </span>
           </div>
 
           {/* الملعب */}
@@ -819,7 +799,7 @@ export default function FootballTactics() {
               <div><span className="block text-[11px] font-semibold text-amber-200">٤ · سدّد</span><span className="text-[10px] text-gray-400">سدّد عندما تظهر فرصة التسديد</span></div>
             </div>
             <p className="mt-2 border-t border-white/5 pt-2 text-center text-[10px] text-gray-500" dir="ltr">
-              اختصارات لوحة المفاتيح: S تسديد · P تمرير · T استخلاص · E إنهاء الدور · Esc إلغاء التحديد
+              اختصارات لوحة المفاتيح: S تسديد · P تمرير · T استخلاص · Esc إلغاء التحديد
             </p>
           </section>
 
@@ -871,18 +851,14 @@ export default function FootballTactics() {
                     <Hand className="w-3.5 h-3.5" /> استخلاص ({tacklePct}%)
                   </button>
                 )}
-                <button
-                  onClick={() => act({ type: 'endTurn' })}
-                  className="glass rounded-lg px-3 py-2 text-xs font-semibold flex items-center gap-1 border border-slate-600"
-                >
-                  <Footprints className="w-3.5 h-3.5" /> إنهاء الدور
-                </button>
               </div>
               <span className="text-[11px] text-gray-500 flex items-center gap-1 text-center">
                 <Shield className="w-3 h-3 shrink-0" />
                 {passActive
                   ? 'دوس على زميلك اللي محوّط بأصفر عشان تمرّر له'
-                  : 'دوس لاعبك، بعدين دوس أي مكان جوا الدايرة لتحرّكه. للتسجيل: سدّد أو ادخل بالكرة لمنطقة المرمى'}
+                  : state.ballOwner === myTeam
+                  ? 'دوس لاعبًا من فريقك ثم اختَر مكانًا قريبًا لتحرّكه. مرّر أو سدّد لصناعة فرصة.'
+                  : 'دوس لاعبًا من فريقك واقترب من حامل الكرة؛ استخلاص الكرة يحوّلك للهجوم.'}
               </span>
             </div>
           )}
